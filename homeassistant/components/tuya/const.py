@@ -51,6 +51,7 @@ CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_COUNTRY_CODE = "country_code"
 CONF_APP_TYPE = "tuya_app_type"
+CONF_INSTRUCTIONS_TYPE = "instructions_type"
 
 TUYA_DISCOVERY_NEW = "tuya_discovery_new"
 TUYA_HA_SIGNAL_UPDATE_ENTITY = "tuya_entry_update"
@@ -137,6 +138,17 @@ class DPCode(StrEnum):
     https://developer.tuya.com/en/docs/iot/standarddescription?id=K9i5ql6waswzq
     """
 
+    SWITCH_DP = "Power"  # Switch
+    TEMP_SET_DP = "TempSet"  # Set the temperature in °C
+    UPPER_TEMP_DP = "TempCurrent"
+    ECO_DP = "ECO"
+    CHILD_LOCK_DP = "ChildLock"  # Child lock
+    MODE_DP = "Mode"
+    PROGRAM_DP = "program"
+    FLOOR_TEMP_DP = "floorTemp"
+    TEMP_SWITCH_DP = "tempSwitch"
+    FLOOR_TEMP_FUNCTION_DP = "floortempFunction"
+    #
     AIR_QUALITY = "air_quality"
     ALARM_SWITCH = "alarm_switch"  # Alarm switch
     ALARM_TIME = "alarm_time"  # Alarm time
@@ -217,6 +229,7 @@ class DPCode(StrEnum):
     DOORCONTACT_STATE_2 = "doorcontact_state_2"
     DOORCONTACT_STATE_3 = "doorcontact_state_3"
     DUSTER_CLOTH = "duster_cloth"
+    ECO = "eco"
     ECO2 = "eco2"
     EDGE_BRUSH = "edge_brush"
     ELECTRICITY_LEFT = "electricity_left"

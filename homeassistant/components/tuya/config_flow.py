@@ -7,6 +7,7 @@ from tuya_iot import AuthType, TuyaOpenAPI
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
     CONF_ACCESS_ID,
@@ -15,6 +16,7 @@ from .const import (
     CONF_AUTH_TYPE,
     CONF_COUNTRY_CODE,
     CONF_ENDPOINT,
+    CONF_INSTRUCTIONS_TYPE,
     CONF_PASSWORD,
     CONF_USERNAME,
     DOMAIN,
@@ -52,6 +54,7 @@ class TuyaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_USERNAME: user_input[CONF_USERNAME],
             CONF_PASSWORD: user_input[CONF_PASSWORD],
             CONF_COUNTRY_CODE: country.country_code,
+            CONF_INSTRUCTIONS_TYPE: user_input[CONF_INSTRUCTIONS_TYPE],
         }
 
         for app_type in ("", TUYA_SMART_APP, SMARTLIFE_APP):
@@ -83,7 +86,7 @@ class TuyaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return response, data
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input=None) -> FlowResult:
         """Step user."""
         errors = {}
         placeholders = {}
@@ -138,6 +141,10 @@ class TuyaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_PASSWORD, default=user_input.get(CONF_PASSWORD, "")
                     ): str,
+                    vol.Required(
+                        CONF_INSTRUCTIONS_TYPE,
+                        default=user_input.get(CONF_INSTRUCTIONS_TYPE, "Standard"),
+                    ): vol.In({"Standard", "DP Instructions"}),
                 }
             ),
             errors=errors,
