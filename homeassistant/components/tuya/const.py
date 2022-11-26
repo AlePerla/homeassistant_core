@@ -53,6 +53,9 @@ CONF_COUNTRY_CODE = "country_code"
 CONF_APP_TYPE = "tuya_app_type"
 CONF_INSTRUCTIONS_TYPE = "instructions_type"
 
+INSTRUCTIONS_STANDARD = "Standard"
+INSTRUCTIONS_DP = "DP Instructions"
+
 TUYA_DISCOVERY_NEW = "tuya_discovery_new"
 TUYA_HA_SIGNAL_UPDATE_ENTITY = "tuya_entry_update"
 

@@ -20,6 +20,8 @@ from .const import (
     CONF_PASSWORD,
     CONF_USERNAME,
     DOMAIN,
+    INSTRUCTIONS_DP,
+    INSTRUCTIONS_STANDARD,
     LOGGER,
     SMARTLIFE_APP,
     TUYA_COUNTRIES,
@@ -143,8 +145,10 @@ class TuyaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): str,
                     vol.Required(
                         CONF_INSTRUCTIONS_TYPE,
-                        default=user_input.get(CONF_INSTRUCTIONS_TYPE, "Standard"),
-                    ): vol.In({"Standard", "DP Instructions"}),
+                        default=user_input.get(
+                            CONF_INSTRUCTIONS_TYPE, INSTRUCTIONS_STANDARD
+                        ),
+                    ): vol.In({INSTRUCTIONS_STANDARD, INSTRUCTIONS_DP}),
                 }
             ),
             errors=errors,

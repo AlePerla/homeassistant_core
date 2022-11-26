@@ -12,7 +12,14 @@ from tuya_iot import TuyaDevice, TuyaDeviceManager
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, Entity
 
-from .const import DOMAIN, LOGGER, TUYA_HA_SIGNAL_UPDATE_ENTITY, DPCode, DPType
+from .const import (
+    DOMAIN,
+    INSTRUCTIONS_DP,
+    LOGGER,
+    TUYA_HA_SIGNAL_UPDATE_ENTITY,
+    DPCode,
+    DPType,
+)
 from .device_specific import DEVICE_SPECIFIC_INT_BASE
 from .util import remap_value
 
@@ -180,7 +187,7 @@ class TuyaEntity(Entity):
 
     def _get_right_dpcode(self, dpcode: DPCode) -> DPCode:
         """Return the DPCode depending by selected instruction type and requested one if not exist."""
-        if self._instruction_type == "DP Instructions":
+        if self._instruction_type == INSTRUCTIONS_DP:
             try:
                 return DPCode[dpcode.name + "_DP"]
             except KeyError:
