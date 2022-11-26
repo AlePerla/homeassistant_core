@@ -244,19 +244,11 @@ class TuyaClimateEntity(TuyaEntity, ClimateEntity):
             prefer_function=True,
         ):
             self._attr_hvac_modes = [HVACMode.OFF]
-            unknown_hvac_modes: list[str] = []
             for tuya_mode in enum_type.range:
                 if tuya_mode in TUYA_HVAC_TO_HA:
                     ha_mode = TUYA_HVAC_TO_HA[tuya_mode]
                     self._hvac_to_tuya[ha_mode] = tuya_mode
                     self._attr_hvac_modes.append(ha_mode)
-                else:
-                    unknown_hvac_modes.append(tuya_mode)
-
-            if unknown_hvac_modes:  # Tuya modes are presets instead of hvac_modes
-                self._attr_hvac_modes.append(description.switch_only_hvac_mode)
-                self._attr_preset_modes = unknown_hvac_modes
-                self._attr_supported_features |= ClimateEntityFeature.PRESET_MODE
         elif self.find_dpcode(
             self._get_right_dpcode(DPCode.SWITCH), prefer_function=True
         ):
