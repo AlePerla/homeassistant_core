@@ -5,7 +5,9 @@
         },
         "step": {
             "user": {
-                "description": "Configurar la integraci\u00f3n de Airzone."
+                "data": {
+                    "id": "ID del sistema"
+                }
             }
         }
     }

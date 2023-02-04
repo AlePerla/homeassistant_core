@@ -366,15 +366,13 @@ class StreamOutput:
 
 
 class StreamView(HomeAssistantView):
-    """
-    Base StreamView.
+    """Base StreamView.
 
     For implementation of a new stream format, define `url` and `name`
     attributes, and implement `handle` method in a child class.
     """
 
     requires_auth = False
-    platform = None
 
     async def get(
         self, request: web.Request, token: str, sequence: str = "", part_num: str = ""
@@ -416,8 +414,7 @@ TRANSFORM_IMAGE_FUNCTION = (
 
 
 class KeyFrameConverter:
-    """
-    Enables generating and getting an image from the last keyframe seen in the stream.
+    """Enables generating and getting an image from the last keyframe seen in the stream.
 
     An overview of the thread and state interaction:
         the worker thread sets a packet
@@ -438,7 +435,7 @@ class KeyFrameConverter:
         """Initialize."""
 
         # Keep import here so that we can import stream integration without installing reqs
-        # pylint: disable=import-outside-toplevel
+        # pylint: disable-next=import-outside-toplevel
         from homeassistant.components.camera.img_util import TurboJPEGSingleton
 
         self.packet: Packet = None
@@ -451,8 +448,7 @@ class KeyFrameConverter:
         self._dynamic_stream_settings = dynamic_stream_settings
 
     def create_codec_context(self, codec_context: CodecContext) -> None:
-        """
-        Create a codec context to be used for decoding the keyframes.
+        """Create a codec context to be used for decoding the keyframes.
 
         This is run by the worker thread and will only be called once per worker.
         """
@@ -461,7 +457,7 @@ class KeyFrameConverter:
             return
 
         # Keep import here so that we can import stream integration without installing reqs
-        # pylint: disable=import-outside-toplevel
+        # pylint: disable-next=import-outside-toplevel
         from av import CodecContext
 
         self._codec_context = CodecContext.create(codec_context.name, "r")
@@ -475,8 +471,7 @@ class KeyFrameConverter:
         return TRANSFORM_IMAGE_FUNCTION[orientation](image)
 
     def _generate_image(self, width: int | None, height: int | None) -> None:
-        """
-        Generate the keyframe image.
+        """Generate the keyframe image.
 
         This is run in an executor thread, but since it is called within an
         the asyncio lock from the main thread, there will only be one entry

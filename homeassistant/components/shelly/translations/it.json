@@ -33,7 +33,7 @@
                 "data": {
                     "host": "Host"
                 },
-                "description": "Prima della configurazione, i dispositivi alimentati a batteria devono essere riattivati, ora puoi riattivare il dispositivo utilizzando un pulsante su di esso."
+                "description": "Prima della configurazione, i dispositivi alimentati a batteria devono essere riattivati, ora \u00e8 possibile riattivare il dispositivo utilizzando un pulsante su di esso."
             }
         }
     },
@@ -69,6 +69,15 @@
                     "ble_scanner_mode": "Modalit\u00e0 scansione Bluetooth"
                 },
                 "description": "La scansione Bluetooth pu\u00f2 essere attiva o passiva. In caso di scansione attiva, lo Shelly richiede dati ai dispositivi vicini; in caso di scansione passiva, lo Shelly riceve dati non richiesti dai dispositivi vicini."
+            }
+        }
+    },
+    "selector": {
+        "ble_scanner_mode": {
+            "options": {
+                "active": "Attivo",
+                "disabled": "Disabilitato",
+                "passive": "Passivo"
             }
         }
     }

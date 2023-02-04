@@ -8,7 +8,7 @@
             "bad_birth": "Tema de nacimiento no v\u00e1lido",
             "bad_certificate": "El certificado de la CA no es v\u00e1lido",
             "bad_client_cert": "Certificado de cliente no v\u00e1lido, aseg\u00farate de proporcionar un archivo codificado PEM",
-            "bad_client_cert_key": "Certificado de cliente y la clave privada no son un par v\u00e1lido",
+            "bad_client_cert_key": "El certificado de cliente y la clave privada no son un par v\u00e1lido",
             "bad_client_key": "Clave privada no v\u00e1lida, aseg\u00farate de que se proporcione un archivo codificado PEM sin contrase\u00f1a",
             "bad_discovery_prefix": "Prefijo de descubrimiento no v\u00e1lido",
             "bad_will": "Tema de voluntad no v\u00e1lido",
@@ -85,7 +85,7 @@
             "bad_birth": "Tema de nacimiento no v\u00e1lido",
             "bad_certificate": "El certificado de la CA no es v\u00e1lido",
             "bad_client_cert": "Certificado de cliente no v\u00e1lido, aseg\u00farate de proporcionar un archivo codificado PEM",
-            "bad_client_cert_key": "Certificado de cliente y la clave privada no son un par v\u00e1lido",
+            "bad_client_cert_key": "El certificado de cliente y la clave privada no son un par v\u00e1lido",
             "bad_client_key": "Clave privada no v\u00e1lida, aseg\u00farate de que se proporcione un archivo codificado PEM sin contrase\u00f1a",
             "bad_discovery_prefix": "Prefijo de descubrimiento no v\u00e1lido",
             "bad_will": "Tema de voluntad no v\u00e1lido",
@@ -134,6 +134,15 @@
                 },
                 "description": "Descubrimiento: si el descubrimiento est\u00e1 habilitado (recomendado), Home Assistant descubrir\u00e1 autom\u00e1ticamente los dispositivos y entidades que publican su configuraci\u00f3n en el agente MQTT. Si el descubrimiento est\u00e1 deshabilitado, toda la configuraci\u00f3n debe realizarse manualmente.\nPrefijo de descubrimiento: el prefijo con el que debe comenzar un tema de configuraci\u00f3n para el descubrimiento autom\u00e1tico.\nMensaje de nacimiento: el mensaje de nacimiento se enviar\u00e1 cada vez que Home Assistant se (re)conecte con el br\u00f3ker MQTT.\nMensaje de voluntad: el mensaje de voluntad se enviar\u00e1 cada vez que Home Assistant pierda su conexi\u00f3n con el br\u00f3ker, tanto en caso de desconexi\u00f3n limpia (por ejemplo, que Home Assistant se apague) como no limpia (por ejemplo, Home Assistant se cuelgue o pierda su conexi\u00f3n de red).",
                 "title": "Opciones de MQTT"
+            }
+        }
+    },
+    "selector": {
+        "set_ca_cert": {
+            "options": {
+                "auto": "Autom\u00e1tico",
+                "custom": "Personalizado",
+                "off": "Apagado"
             }
         }
     }

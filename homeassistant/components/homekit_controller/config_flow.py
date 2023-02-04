@@ -91,8 +91,7 @@ def find_existing_host(
 
 
 def ensure_pin_format(pin: str, allow_insecure_setup_codes: Any = None) -> str:
-    """
-    Ensure a pin code is correctly formatted.
+    """Ensure a pin code is correctly formatted.
 
     Ensures a pin code is in the format 111-11-111. Handles codes with and without dashes.
 
@@ -167,7 +166,9 @@ class HomekitControllerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required("device"): vol.In(
                         {
-                            key: f"{key} ({formatted_category(discovery.description.category)})"
+                            key: (
+                                f"{key} ({formatted_category(discovery.description.category)})"
+                            )
                             for key, discovery in self.devices.items()
                         }
                     )
@@ -232,7 +233,10 @@ class HomekitControllerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             # This can happen if the TXT record is received after the PTR record
             # we will wait for the next update in this case
             _LOGGER.debug(
-                "HomeKit device %s: id not exposed; TXT record may have not yet been received",
+                (
+                    "HomeKit device %s: id not exposed; TXT record may have not yet"
+                    " been received"
+                ),
                 properties,
             )
             return self.async_abort(reason="invalid_properties")
@@ -291,7 +295,10 @@ class HomekitControllerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 await pairing.list_accessories_and_characteristics()
             except AuthenticationError:
                 _LOGGER.debug(
-                    "%s (%s - %s) is unpaired. Removing invalid pairing for this device",
+                    (
+                        "%s (%s - %s) is unpaired. Removing invalid pairing for this"
+                        " device"
+                    ),
                     name,
                     model,
                     hkid,
@@ -299,9 +306,11 @@ class HomekitControllerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.hass.config_entries.async_remove(existing.entry_id)
             else:
                 _LOGGER.debug(
-                    "%s (%s - %s) claims to be unpaired but isn't. "
-                    "It's implementation of HomeKit is defective "
-                    "or a zeroconf relay is broadcasting stale data",
+                    (
+                        "%s (%s - %s) claims to be unpaired but isn't. "
+                        "It's implementation of HomeKit is defective "
+                        "or a zeroconf relay is broadcasting stale data"
+                    ),
                     name,
                     model,
                     hkid,
@@ -583,6 +592,7 @@ class HomekitControllerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             accessories_state.config_num,
             accessories_state.accessories.serialize(),
             serialize_broadcast_key(accessories_state.broadcast_key),
+            accessories_state.state_num,
         )
 
         return self.async_create_entry(title=name, data=pairing_data)

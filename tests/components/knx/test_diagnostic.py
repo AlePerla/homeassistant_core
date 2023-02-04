@@ -1,7 +1,6 @@
 """Tests for the diagnostics data provided by the KNX integration."""
 from unittest.mock import patch
 
-from aiohttp import ClientSession
 from xknx.io import DEFAULT_MCAST_GRP, DEFAULT_MCAST_PORT
 
 from homeassistant.components.knx.const import (
@@ -14,6 +13,7 @@ from homeassistant.components.knx.const import (
     CONF_KNX_MCAST_GRP,
     CONF_KNX_MCAST_PORT,
     CONF_KNX_RATE_LIMIT,
+    CONF_KNX_ROUTING_BACKBONE_KEY,
     CONF_KNX_SECURE_DEVICE_AUTHENTICATION,
     CONF_KNX_SECURE_USER_PASSWORD,
     CONF_KNX_STATE_UPDATER,
@@ -26,11 +26,12 @@ from .conftest import KNXTestKit
 
 from tests.common import MockConfigEntry
 from tests.components.diagnostics import get_diagnostics_for_config_entry
+from tests.typing import ClientSessionGenerator
 
 
 async def test_diagnostics(
     hass: HomeAssistant,
-    hass_client: ClientSession,
+    hass_client: ClientSessionGenerator,
     mock_config_entry: MockConfigEntry,
     knx: KNXTestKit,
 ):
@@ -59,7 +60,7 @@ async def test_diagnostics(
 
 async def test_diagnostic_config_error(
     hass: HomeAssistant,
-    hass_client: ClientSession,
+    hass_client: ClientSessionGenerator,
     mock_config_entry: MockConfigEntry,
     knx: KNXTestKit,
 ):
@@ -91,7 +92,7 @@ async def test_diagnostic_config_error(
 
 async def test_diagnostic_redact(
     hass: HomeAssistant,
-    hass_client: ClientSession,
+    hass_client: ClientSessionGenerator,
 ):
     """Test diagnostics redacting data."""
     mock_config_entry: MockConfigEntry = MockConfigEntry(
@@ -107,6 +108,7 @@ async def test_diagnostic_redact(
             CONF_KNX_KNXKEY_PASSWORD: "password",
             CONF_KNX_SECURE_USER_PASSWORD: "user_password",
             CONF_KNX_SECURE_DEVICE_AUTHENTICATION: "device_authentication",
+            CONF_KNX_ROUTING_BACKBONE_KEY: "bbaacc44bbaacc44bbaacc44bbaacc44",
         },
     )
     knx: KNXTestKit = KNXTestKit(hass, mock_config_entry)
@@ -128,6 +130,7 @@ async def test_diagnostic_redact(
                 "knxkeys_password": "**REDACTED**",
                 "user_password": "**REDACTED**",
                 "device_authentication": "**REDACTED**",
+                "backbone_key": "**REDACTED**",
             },
             "configuration_error": None,
             "configuration_yaml": None,

@@ -1,4 +1,5 @@
 """Test requirements module."""
+import logging
 import os
 from unittest.mock import call, patch
 
@@ -13,7 +14,7 @@ from homeassistant.requirements import (
     async_process_requirements,
 )
 
-from tests.common import MockModule, mock_integration
+from .common import MockModule, mock_integration
 
 
 def env_without_wheel_links():
@@ -93,6 +94,23 @@ async def test_install_missing_package(hass):
     assert len(mock_inst.mock_calls) == 3
 
 
+async def test_install_skipped_package(hass, caplog):
+    """Test an install attempt on a dependency that should be skipped."""
+    with patch(
+        "homeassistant.util.package.install_package", return_value=True
+    ) as mock_inst:
+        hass.config.skip_pip_packages = ["hello"]
+        with caplog.at_level(logging.WARNING):
+            await async_process_requirements(
+                hass, "test_component", ["hello==1.0.0", "not_skipped==1.2.3"]
+            )
+
+    assert "Skipping requirement hello==1.0.0" in caplog.text
+
+    assert len(mock_inst.mock_calls) == 1
+    assert mock_inst.mock_calls[0].args[0] == "not_skipped==1.2.3"
+
+
 async def test_get_integration_with_requirements(hass):
     """Check getting an integration with loaded requirements."""
     hass.config.skip_pip = False
@@ -120,7 +138,6 @@ async def test_get_integration_with_requirements(hass):
     ) as mock_is_installed, patch(
         "homeassistant.util.package.install_package", return_value=True
     ) as mock_inst:
-
         integration = await async_get_integration_with_requirements(
             hass, "test_component"
         )
@@ -175,7 +192,6 @@ async def test_get_integration_with_requirements_pip_install_fails_two_passes(ha
     ) as mock_is_installed, patch(
         "homeassistant.util.package.install_package", side_effect=_mock_install_package
     ) as mock_inst:
-
         integration = await async_get_integration_with_requirements(
             hass, "test_component"
         )
@@ -206,7 +222,6 @@ async def test_get_integration_with_requirements_pip_install_fails_two_passes(ha
     ) as mock_is_installed, patch(
         "homeassistant.util.package.install_package", side_effect=_mock_install_package
     ) as mock_inst:
-
         integration = await async_get_integration_with_requirements(
             hass, "test_component"
         )
@@ -225,7 +240,6 @@ async def test_get_integration_with_requirements_pip_install_fails_two_passes(ha
     ) as mock_is_installed, patch(
         "homeassistant.util.package.install_package", side_effect=_mock_install_package
     ) as mock_inst:
-
         integration = await async_get_integration_with_requirements(
             hass, "test_component"
         )
@@ -256,7 +270,6 @@ async def test_get_integration_with_requirements_pip_install_fails_two_passes(ha
     ) as mock_is_installed, patch(
         "homeassistant.util.package.install_package", return_value=True
     ) as mock_inst:
-
         integration = await async_get_integration_with_requirements(
             hass, "test_component"
         )
@@ -401,7 +414,7 @@ async def test_discovery_requirements_mqtt(hass):
     ) as mock_process:
         await async_get_integration_with_requirements(hass, "mqtt_comp")
 
-    assert len(mock_process.mock_calls) == 2  # mqtt also depends on http
+    assert len(mock_process.mock_calls) == 3  # mqtt also depends on http
     assert mock_process.mock_calls[0][1][1] == mqtt.requirements
 
 

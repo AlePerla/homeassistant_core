@@ -8,7 +8,7 @@
             "bad_birth": "Kehtetu loomise teavitus",
             "bad_certificate": "CA sertifikaat on kehtetu",
             "bad_client_cert": "Kehtetu kliendi sertifikaat, veendu, et on esitatud PEM-kodeeritud fail",
-            "bad_client_cert_key": "Kliendisertifikaat ja privaatne sertifikaat ei ole kehtiv paar",
+            "bad_client_cert_key": "Kliendisertifikaat ja privaatne v\u00f5ti ei ole kehtiv paar",
             "bad_client_key": "Kehtetu privaatv\u00f5ti, veendu, et PEM-kodeeritud fail tarnitakse ilma paroolita",
             "bad_discovery_prefix": "Sobimatu tuvastuse eesliide",
             "bad_will": "Kehtetu l\u00f5petamise teavitus",
@@ -134,6 +134,15 @@
                 },
                 "description": "Avastamine - Kui avastamine on lubatud (soovitatav), avastab Home Assistant automaatselt seadmed ja \u00fcksused, mis avaldavad oma konfiguratsiooni MQTT-vahendaja kaudu. Kui avastamine on v\u00e4lja l\u00fclitatud, tuleb kogu konfigureerimine teha k\u00e4sitsi.\nDiscovery prefix (Avastamise eesliide) - automaatse avastamise konfiguratsiooniteema eesliide, millega peab algama.\nBirth message (s\u00fcnniteade) - s\u00fcnniteade saadetakse iga kord, kui Home Assistant (taas)\u00fchendub MQTT-vahendajaga.\nWill message - Will message saadetakse iga kord, kui Home Assistant kaotab \u00fchenduse maakleriga, nii puhta (nt Home Assistant l\u00f5petab tegevuse) kui ka ebapuhta (nt Home Assistant kukub kokku v\u00f5i kaotab v\u00f5rgu\u00fchenduse) katkestamise korral.",
                 "title": "MQTT valikud"
+            }
+        }
+    },
+    "selector": {
+        "set_ca_cert": {
+            "options": {
+                "auto": "Automaatne",
+                "custom": "Kohandatud",
+                "off": "V\u00e4ljas"
             }
         }
     }
