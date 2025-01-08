@@ -1,4 +1,5 @@
 """Tests for the Google Assistant notify."""
+
 from unittest.mock import call, patch
 
 import pytest
@@ -13,7 +14,7 @@ from .conftest import ComponentSetup, ExpectedCredentials
 
 
 @pytest.mark.parametrize(
-    "language_code,message,expected_command",
+    ("language_code", "message", "expected_command"),
     [
         ("en-US", "Dinner is served", "broadcast Dinner is served"),
         ("es-ES", "La cena está en la mesa", "Anuncia La cena está en la mesa"),
@@ -33,7 +34,9 @@ async def test_broadcast_no_targets(
     await setup_integration()
 
     entry = hass.config_entries.async_entries(DOMAIN)[0]
-    entry.options = {"language_code": language_code}
+    hass.config_entries.async_update_entry(
+        entry, options={"language_code": language_code}
+    )
 
     with patch(
         "homeassistant.components.google_assistant_sdk.helpers.TextAssistant"
@@ -47,11 +50,12 @@ async def test_broadcast_no_targets(
     mock_text_assistant.assert_called_once_with(
         ExpectedCredentials(), language_code, audio_out=False
     )
+    # pylint:disable-next=unnecessary-dunder-call
     mock_text_assistant.assert_has_calls([call().__enter__().assist(expected_command)])
 
 
 @pytest.mark.parametrize(
-    "language_code,message,target,expected_command",
+    ("language_code", "message", "target", "expected_command"),
     [
         (
             "en-US",
@@ -66,7 +70,12 @@ async def test_broadcast_no_targets(
             "Anuncia en el salón Es hora de hacer los deberes",
         ),
         ("ko-KR", "숙제할 시간이야", "거실", "숙제할 시간이야 라고 거실에 방송해 줘"),
-        ("ja-JP", "宿題の時間だよ", "リビング", "宿題の時間だよとリビングにブロードキャストして"),
+        (
+            "ja-JP",
+            "宿題の時間だよ",
+            "リビング",
+            "宿題の時間だよとリビングにブロードキャストして",
+        ),
     ],
     ids=["english", "spanish", "korean", "japanese"],
 )
@@ -82,7 +91,9 @@ async def test_broadcast_one_target(
     await setup_integration()
 
     entry = hass.config_entries.async_entries(DOMAIN)[0]
-    entry.options = {"language_code": language_code}
+    hass.config_entries.async_update_entry(
+        entry, options={"language_code": language_code}
+    )
 
     with patch(
         "homeassistant.components.google_assistant_sdk.helpers.TextAssistant.assist",

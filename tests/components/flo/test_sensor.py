@@ -1,14 +1,22 @@
 """Test Flo by Moen sensor entities."""
+
+import pytest
+
 from homeassistant.components.flo.const import DOMAIN as FLO_DOMAIN
 from homeassistant.components.sensor import ATTR_STATE_CLASS, SensorStateClass
 from homeassistant.const import ATTR_ENTITY_ID, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from .common import TEST_PASSWORD, TEST_USER_ID
 
+from tests.common import MockConfigEntry
+from tests.test_util.aiohttp import AiohttpClientMocker
 
-async def test_sensors(hass, config_entry, aioclient_mock_fixture):
+
+@pytest.mark.usefixtures("aioclient_mock_fixture")
+async def test_sensors(hass: HomeAssistant, config_entry: MockConfigEntry) -> None:
     """Test Flo by Moen sensors."""
     hass.config.units = US_CUSTOMARY_SYSTEM
     config_entry.add_to_hass(hass)
@@ -79,9 +87,12 @@ async def test_sensors(hass, config_entry, aioclient_mock_fixture):
     )
 
 
+@pytest.mark.usefixtures("aioclient_mock_fixture")
 async def test_manual_update_entity(
-    hass, config_entry, aioclient_mock_fixture, aioclient_mock
-):
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+) -> None:
     """Test manual update entity via service homeasasistant/update_entity."""
     config_entry.add_to_hass(hass)
     assert await async_setup_component(

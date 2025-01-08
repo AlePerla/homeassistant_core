@@ -1,5 +1,5 @@
 """Test the SFR Box config flow."""
-from collections.abc import Generator
+
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -7,30 +7,26 @@ import pytest
 from sfrbox_api.exceptions import SFRBoxAuthenticationError, SFRBoxError
 from sfrbox_api.models import SystemInfo
 
-from homeassistant import config_entries, data_entry_flow
+from homeassistant import config_entries
 from homeassistant.components.sfr_box.const import DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
 
 from tests.common import load_fixture
 
-
-@pytest.fixture(autouse=True, name="mock_setup_entry")
-def override_async_setup_entry() -> Generator[AsyncMock, None, None]:
-    """Override async_setup_entry."""
-    with patch(
-        "homeassistant.components.sfr_box.async_setup_entry", return_value=True
-    ) as mock_setup_entry:
-        yield mock_setup_entry
+pytestmark = pytest.mark.usefixtures("mock_setup_entry")
 
 
-async def test_config_flow_skip_auth(hass: HomeAssistant, mock_setup_entry: AsyncMock):
+async def test_config_flow_skip_auth(
+    hass: HomeAssistant, mock_setup_entry: AsyncMock
+) -> None:
     """Test we get the form."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {}
 
     with patch(
@@ -44,7 +40,7 @@ async def test_config_flow_skip_auth(hass: HomeAssistant, mock_setup_entry: Asyn
             },
         )
 
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "cannot_connect"}
 
     with patch(
@@ -60,7 +56,7 @@ async def test_config_flow_skip_auth(hass: HomeAssistant, mock_setup_entry: Asyn
             },
         )
 
-    assert result["type"] == data_entry_flow.FlowResultType.MENU
+    assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == "choose_auth"
 
     result = await hass.config_entries.flow.async_configure(
@@ -68,19 +64,21 @@ async def test_config_flow_skip_auth(hass: HomeAssistant, mock_setup_entry: Asyn
         {"next_step_id": "skip_auth"},
     )
 
-    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "SFR Box"
     assert result["data"] == {CONF_HOST: "192.168.0.1"}
 
     assert len(mock_setup_entry.mock_calls) == 1
 
 
-async def test_config_flow_with_auth(hass: HomeAssistant, mock_setup_entry: AsyncMock):
+async def test_config_flow_with_auth(
+    hass: HomeAssistant, mock_setup_entry: AsyncMock
+) -> None:
     """Test we get the form."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {}
 
     with patch(
@@ -96,7 +94,7 @@ async def test_config_flow_with_auth(hass: HomeAssistant, mock_setup_entry: Asyn
             },
         )
 
-    assert result["type"] == data_entry_flow.FlowResultType.MENU
+    assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == "choose_auth"
 
     result = await hass.config_entries.flow.async_configure(
@@ -116,7 +114,7 @@ async def test_config_flow_with_auth(hass: HomeAssistant, mock_setup_entry: Asyn
             },
         )
 
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
 
     with patch("homeassistant.components.sfr_box.config_flow.SFRBox.authenticate"):
@@ -128,7 +126,7 @@ async def test_config_flow_with_auth(hass: HomeAssistant, mock_setup_entry: Asyn
             },
         )
 
-    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "SFR Box"
     assert result["data"] == {
         CONF_HOST: "192.168.0.1",
@@ -142,14 +140,14 @@ async def test_config_flow_with_auth(hass: HomeAssistant, mock_setup_entry: Asyn
 @pytest.mark.usefixtures("config_entry")
 async def test_config_flow_duplicate_host(
     hass: HomeAssistant, mock_setup_entry: AsyncMock
-):
+) -> None:
     """Test abort if unique_id configured."""
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
 
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {}
 
     system_info = SystemInfo(**json.loads(load_fixture("system_getInfo.json", DOMAIN)))
@@ -166,7 +164,7 @@ async def test_config_flow_duplicate_host(
             },
         )
 
-    assert result["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     await hass.async_block_till_done()
 
@@ -176,14 +174,14 @@ async def test_config_flow_duplicate_host(
 @pytest.mark.usefixtures("config_entry")
 async def test_config_flow_duplicate_mac(
     hass: HomeAssistant, mock_setup_entry: AsyncMock
-):
+) -> None:
     """Test abort if unique_id configured."""
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
 
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {}
 
     system_info = SystemInfo(**json.loads(load_fixture("system_getInfo.json", DOMAIN)))
@@ -198,7 +196,7 @@ async def test_config_flow_duplicate_mac(
             },
         )
 
-    assert result["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     await hass.async_block_till_done()
 
@@ -209,17 +207,9 @@ async def test_reauth(hass: HomeAssistant, config_entry_with_auth: ConfigEntry) 
     """Test the start of the config flow."""
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={
-            "source": config_entries.SOURCE_REAUTH,
-            "entry_id": config_entry_with_auth.entry_id,
-            "unique_id": config_entry_with_auth.unique_id,
-        },
-        data=config_entry_with_auth.data,
-    )
+    result = await config_entry_with_auth.start_reauth_flow(hass)
 
-    assert result.get("type") == data_entry_flow.FlowResultType.FORM
+    assert result.get("type") is FlowResultType.FORM
     assert result.get("errors") == {}
 
     # Failed credentials
@@ -235,7 +225,7 @@ async def test_reauth(hass: HomeAssistant, config_entry_with_auth: ConfigEntry) 
             },
         )
 
-    assert result.get("type") == data_entry_flow.FlowResultType.FORM
+    assert result.get("type") is FlowResultType.FORM
     assert result.get("errors") == {"base": "invalid_auth"}
 
     # Valid credentials
@@ -248,5 +238,5 @@ async def test_reauth(hass: HomeAssistant, config_entry_with_auth: ConfigEntry) 
             },
         )
 
-    assert result.get("type") == data_entry_flow.FlowResultType.ABORT
+    assert result.get("type") is FlowResultType.ABORT
     assert result.get("reason") == "reauth_successful"

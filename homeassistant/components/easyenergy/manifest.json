@@ -1,10 +1,11 @@
 {
   "domain": "easyenergy",
   "name": "easyEnergy",
+  "codeowners": ["@klaasnicolaas"],
   "config_flow": true,
   "documentation": "https://www.home-assistant.io/integrations/easyenergy",
-  "requirements": ["easyenergy==0.1.2"],
-  "codeowners": ["@klaasnicolaas"],
+  "integration_type": "service",
   "iot_class": "cloud_polling",
-  "quality_scale": "platinum"
+  "requirements": ["easyenergy==2.1.2"],
+  "single_config_entry": true
 }

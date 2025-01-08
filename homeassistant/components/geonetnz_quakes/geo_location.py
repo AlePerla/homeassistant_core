@@ -1,4 +1,5 @@
 """Geolocation support for GeoNet NZ Quakes Feeds."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -65,7 +66,7 @@ async def async_setup_entry(
 
 
 class GeonetnzQuakesEvent(GeolocationEvent):
-    """This represents an external event with GeoNet NZ Quakes feed data."""
+    """Represents an external event with GeoNet NZ Quakes feed data."""
 
     _attr_icon = "mdi:pulse"
     _attr_should_poll = False
@@ -155,16 +156,16 @@ class GeonetnzQuakesEvent(GeolocationEvent):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the device state attributes."""
-        attributes = {}
-        for key, value in (
-            (ATTR_EXTERNAL_ID, self._external_id),
-            (ATTR_DEPTH, self._depth),
-            (ATTR_LOCALITY, self._locality),
-            (ATTR_MAGNITUDE, self._magnitude),
-            (ATTR_MMI, self._mmi),
-            (ATTR_QUALITY, self._quality),
-            (ATTR_TIME, self._time),
-        ):
-            if value or isinstance(value, bool):
-                attributes[key] = value
-        return attributes
+        return {
+            key: value
+            for key, value in (
+                (ATTR_EXTERNAL_ID, self._external_id),
+                (ATTR_DEPTH, self._depth),
+                (ATTR_LOCALITY, self._locality),
+                (ATTR_MAGNITUDE, self._magnitude),
+                (ATTR_MMI, self._mmi),
+                (ATTR_QUALITY, self._quality),
+                (ATTR_TIME, self._time),
+            )
+            if value or isinstance(value, bool)
+        }

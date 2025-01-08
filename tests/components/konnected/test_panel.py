@@ -1,10 +1,12 @@
 """Test Konnected setup process."""
+
 from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 
 from homeassistant.components.konnected import config_flow, panel
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_component import async_update_entity
 from homeassistant.setup import async_setup_component
 from homeassistant.util import utcnow
@@ -43,7 +45,7 @@ async def mock_panel_fixture():
         yield konn_client
 
 
-async def test_create_and_setup(hass, mock_panel):
+async def test_create_and_setup(hass: HomeAssistant, mock_panel) -> None:
     """Test that we create a Konnected Panel and save the data."""
     device_config = config_flow.CONFIG_ENTRY_SCHEMA(
         {
@@ -217,7 +219,7 @@ async def test_create_and_setup(hass, mock_panel):
     }
 
 
-async def test_create_and_setup_pro(hass, mock_panel):
+async def test_create_and_setup_pro(hass: HomeAssistant, mock_panel) -> None:
     """Test that we create a Konnected Pro Panel and save the data."""
     device_config = config_flow.CONFIG_ENTRY_SCHEMA(
         {
@@ -413,7 +415,7 @@ async def test_create_and_setup_pro(hass, mock_panel):
     }
 
 
-async def test_default_options(hass, mock_panel):
+async def test_default_options(hass: HomeAssistant, mock_panel) -> None:
     """Test that we create a Konnected Panel and save the data."""
     device_config = config_flow.CONFIG_ENTRY_SCHEMA(
         {
@@ -590,7 +592,7 @@ async def test_default_options(hass, mock_panel):
     }
 
 
-async def test_connect_retry(hass, mock_panel):
+async def test_connect_retry(hass: HomeAssistant, mock_panel) -> None:
     """Test that we create a Konnected Panel and save the data."""
     device_config = config_flow.CONFIG_ENTRY_SCHEMA(
         {
@@ -698,4 +700,4 @@ async def test_connect_retry(hass, mock_panel):
     async_fire_time_changed(hass, utcnow() + timedelta(seconds=21))
     await hass.async_block_till_done()
     await async_update_entity(hass, "switch.konnected_445566_actuator_6")
-    assert hass.states.get("switch.konnected_445566_actuator_6").state == "off"
+    assert hass.states.get("switch.konnected_445566_actuator_6").state == "unknown"

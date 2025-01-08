@@ -1,4 +1,5 @@
 """Diagnostics support for Ridwell."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -32,7 +33,11 @@ async def async_get_config_entry_diagnostics(
     return async_redact_data(
         {
             "entry": entry.as_dict(),
-            "data": [dataclasses.asdict(event) for event in coordinator.data.values()],
+            "data": [
+                dataclasses.asdict(event)
+                for events in coordinator.data.values()
+                for event in events
+            ],
         },
         TO_REDACT,
     )

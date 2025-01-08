@@ -4,10 +4,10 @@ from asyncio import Future
 from unittest.mock import ANY, patch
 
 from homeassistant.components.group.reproduce_state import async_reproduce_states
-from homeassistant.core import Context, State
+from homeassistant.core import Context, HomeAssistant, State
 
 
-async def test_reproduce_group(hass):
+async def test_reproduce_group(hass: HomeAssistant) -> None:
     """Test reproduce_state with group."""
     context = Context()
 

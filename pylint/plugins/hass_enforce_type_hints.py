@@ -1,4 +1,5 @@
 """Plugin to enforce type hints on specific functions."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,14 +19,22 @@ if TYPE_CHECKING:
     # pre-commit should still work on out of date environments
     from astroid.typing import InferenceResult
 
+_COMMON_ARGUMENTS: dict[str, list[str]] = {
+    "hass": ["HomeAssistant", "HomeAssistant | None"]
+}
+_PLATFORMS: set[str] = {platform.value for platform in Platform}
+_KNOWN_GENERIC_TYPES: set[str] = {
+    "ConfigEntry",
+}
+_KNOWN_GENERIC_TYPES_TUPLE = tuple(_KNOWN_GENERIC_TYPES)
+
+_FORCE_ANNOTATION_PLATFORMS = ["config_flow"]
+
 
 class _Special(Enum):
     """Sentinel values."""
 
     UNDEFINED = 1
-
-
-_PLATFORMS: set[str] = {platform.value for platform in Platform}
 
 
 @dataclass
@@ -40,7 +49,6 @@ class TypeHintMatch:
     """named_arg_types is for named or keyword arguments"""
     kwargs_type: str | None = None
     """kwargs_type is for the special case `**kwargs`"""
-    check_return_type_inheritance: bool = False
     has_async_counterpart: bool = False
 
     def need_to_check_function(self, node: nodes.FunctionDef) -> bool:
@@ -54,15 +62,16 @@ class TypeHintMatch:
         )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ClassTypeHintMatch:
     """Class for pattern matching."""
 
     base_class: str
+    exclude_base_classes: set[str] | None = None
     matches: list[TypeHintMatch]
 
 
-_INNER_MATCH = r"((?:[\w\| ]+)|(?:\.{3})|(?:\w+\[.+\]))"
+_INNER_MATCH = r"((?:[\w\| ]+)|(?:\.{3})|(?:\w+\[.+\])|(?:\[\]))"
 _TYPE_HINT_MATCHERS: dict[str, re.Pattern[str]] = {
     # a_or_b matches items such as "DiscoveryInfoType | None"
     # or "dict | list | None"
@@ -72,7 +81,7 @@ _INNER_MATCH_POSSIBILITIES = [i + 1 for i in range(5)]
 _TYPE_HINT_MATCHERS.update(
     {
         f"x_of_y_{i}": re.compile(
-            rf"^(\w+)\[{_INNER_MATCH}" + f", {_INNER_MATCH}" * (i - 1) + r"\]$"
+            rf"^([\w\.]+)\[{_INNER_MATCH}" + f", {_INNER_MATCH}" * (i - 1) + r"\]$"
         )
         for i in _INNER_MATCH_POSSIBILITIES
     }
@@ -80,6 +89,85 @@ _TYPE_HINT_MATCHERS.update(
 
 
 _MODULE_REGEX: re.Pattern[str] = re.compile(r"^homeassistant\.components\.\w+(\.\w+)?$")
+
+_METHOD_MATCH: list[TypeHintMatch] = [
+    TypeHintMatch(
+        function_name="__init__",
+        return_type=None,
+    ),
+]
+
+_TEST_FIXTURES: dict[str, list[str] | str] = {
+    "aioclient_mock": "AiohttpClientMocker",
+    "aiohttp_client": "ClientSessionGenerator",
+    "aiohttp_server": "Callable[[], TestServer]",
+    "area_registry": "AreaRegistry",
+    "async_test_recorder": "RecorderInstanceGenerator",
+    "caplog": "pytest.LogCaptureFixture",
+    "capsys": "pytest.CaptureFixture[str]",
+    "current_request_with_host": "None",
+    "device_registry": "DeviceRegistry",
+    "enable_bluetooth": "None",
+    "enable_custom_integrations": "None",
+    "enable_missing_statistics": "bool",
+    "enable_nightly_purge": "bool",
+    "enable_statistics": "bool",
+    "enable_schema_validation": "bool",
+    "entity_registry": "EntityRegistry",
+    "entity_registry_enabled_by_default": "None",
+    "event_loop": "AbstractEventLoop",
+    "freezer": "FrozenDateTimeFactory",
+    "hass": "HomeAssistant",
+    "hass_access_token": "str",
+    "hass_admin_credential": "Credentials",
+    "hass_admin_user": "MockUser",
+    "hass_client": "ClientSessionGenerator",
+    "hass_client_no_auth": "ClientSessionGenerator",
+    "hass_config": "ConfigType",
+    "hass_config_yaml": "str",
+    "hass_config_yaml_files": "dict[str, str]",
+    "hass_owner_user": "MockUser",
+    "hass_read_only_access_token": "str",
+    "hass_read_only_user": "MockUser",
+    "hass_storage": "dict[str, Any]",
+    "hass_supervisor_access_token": "str",
+    "hass_supervisor_user": "MockUser",
+    "hass_ws_client": "WebSocketGenerator",
+    "init_tts_cache_dir_side_effect": "Any",
+    "issue_registry": "IssueRegistry",
+    "local_auth": "HassAuthProvider",
+    "mock_async_zeroconf": "MagicMock",
+    "mock_bleak_scanner_start": "MagicMock",
+    "mock_bluetooth": "None",
+    "mock_bluetooth_adapters": "None",
+    "mock_conversation_agent": "MockAgent",
+    "mock_device_tracker_conf": "list[Device]",
+    "mock_get_source_ip": "_patch",
+    "mock_hass_config": "None",
+    "mock_hass_config_yaml": "None",
+    "mock_tts_cache_dir": "Path",
+    "mock_tts_get_cache_files": "MagicMock",
+    "mock_tts_init_cache_dir": "MagicMock",
+    "mock_zeroconf": "MagicMock",
+    "monkeypatch": "pytest.MonkeyPatch",
+    "mqtt_client_mock": "MqttMockPahoClient",
+    "mqtt_mock": "MqttMockHAClient",
+    "mqtt_mock_entry": "MqttMockHAClientGenerator",
+    "recorder_db_url": "str",
+    "recorder_mock": "Recorder",
+    "request": "pytest.FixtureRequest",
+    "requests_mock": "Mocker",
+    "service_calls": "list[ServiceCall]",
+    "snapshot": "SnapshotAssertion",
+    "socket_enabled": "None",
+    "stub_blueprint_populate": "None",
+    "tmp_path": "Path",
+    "tmpdir": "py.path.local",
+    "tts_mutagen_mock": "MagicMock",
+    "unused_tcp_port_factory": "Callable[[], int]",
+    "unused_udp_port_factory": "Callable[[], int]",
+}
+
 
 _FUNCTION_MATCH: dict[str, list[TypeHintMatch]] = {
     "__init__": [
@@ -132,6 +220,14 @@ _FUNCTION_MATCH: dict[str, list[TypeHintMatch]] = {
                 2: "DeviceEntry",
             },
             return_type="bool",
+        ),
+        TypeHintMatch(
+            function_name="async_reset_platform",
+            arg_types={
+                0: "HomeAssistant",
+                1: "str",
+            },
+            return_type=None,
         ),
     ],
     "__any_platform__": [
@@ -328,7 +424,6 @@ _FUNCTION_MATCH: dict[str, list[TypeHintMatch]] = {
                 1: "ConfigType",
             },
             return_type=["DeviceScanner", None],
-            check_return_type_inheritance=True,
             has_async_counterpart=True,
         ),
     ],
@@ -396,7 +491,6 @@ _FUNCTION_MATCH: dict[str, list[TypeHintMatch]] = {
                 2: "DiscoveryInfoType | None",
             },
             return_type=["BaseNotificationService", None],
-            check_return_type_inheritance=True,
             has_async_counterpart=True,
         ),
     ],
@@ -406,6 +500,7 @@ _CLASS_MATCH: dict[str, list[ClassTypeHintMatch]] = {
     "config_flow": [
         ClassTypeHintMatch(
             base_class="FlowHandler",
+            exclude_base_classes={"ConfigEntryBaseFlow"},
             matches=[
                 TypeHintMatch(
                     function_name="async_step_*",
@@ -423,63 +518,77 @@ _CLASS_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                         0: "ConfigEntry",
                     },
                     return_type="OptionsFlow",
-                    check_return_type_inheritance=True,
                 ),
                 TypeHintMatch(
                     function_name="async_step_dhcp",
                     arg_types={
                         1: "DhcpServiceInfo",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
                 ),
                 TypeHintMatch(
                     function_name="async_step_hassio",
                     arg_types={
                         1: "HassioServiceInfo",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
                 ),
                 TypeHintMatch(
                     function_name="async_step_homekit",
                     arg_types={
                         1: "ZeroconfServiceInfo",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
                 ),
                 TypeHintMatch(
                     function_name="async_step_mqtt",
                     arg_types={
                         1: "MqttServiceInfo",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
                 ),
                 TypeHintMatch(
                     function_name="async_step_reauth",
                     arg_types={
                         1: "Mapping[str, Any]",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
                 ),
                 TypeHintMatch(
                     function_name="async_step_ssdp",
                     arg_types={
                         1: "SsdpServiceInfo",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
                 ),
                 TypeHintMatch(
                     function_name="async_step_usb",
                     arg_types={
                         1: "UsbServiceInfo",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
                 ),
                 TypeHintMatch(
                     function_name="async_step_zeroconf",
                     arg_types={
                         1: "ZeroconfServiceInfo",
                     },
-                    return_type="FlowResult",
+                    return_type="ConfigFlowResult",
+                ),
+                TypeHintMatch(
+                    function_name="async_step_*",
+                    arg_types={},
+                    return_type="ConfigFlowResult",
+                ),
+            ],
+        ),
+        ClassTypeHintMatch(
+            base_class="OptionsFlow",
+            matches=[
+                TypeHintMatch(
+                    function_name="async_step_*",
+                    arg_types={},
+                    return_type="ConfigFlowResult",
                 ),
             ],
         ),
@@ -499,7 +608,7 @@ _ENTITY_MATCH: list[TypeHintMatch] = [
     ),
     TypeHintMatch(
         function_name="name",
-        return_type=["str", None],
+        return_type=["str", "UndefinedType", None],
     ),
     TypeHintMatch(
         function_name="state",
@@ -512,10 +621,6 @@ _ENTITY_MATCH: list[TypeHintMatch] = [
     TypeHintMatch(
         function_name="state_attributes",
         return_type=["dict[str, Any]", None],
-    ),
-    TypeHintMatch(
-        function_name="device_state_attributes",
-        return_type=["Mapping[str, Any]", None],
     ),
     TypeHintMatch(
         function_name="extra_state_attributes",
@@ -556,10 +661,6 @@ _ENTITY_MATCH: list[TypeHintMatch] = [
     TypeHintMatch(
         function_name="supported_features",
         return_type=["int", None],
-    ),
-    TypeHintMatch(
-        function_name="context_recent_time",
-        return_type="timedelta",
     ),
     TypeHintMatch(
         function_name="entity_registry_enabled_default",
@@ -645,6 +746,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="AlarmControlPanelEntity",
             matches=[
                 TypeHintMatch(
@@ -728,6 +833,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="BinarySensorEntity",
             matches=[
                 TypeHintMatch(
@@ -771,6 +880,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="CalendarEntity",
             matches=[
                 TypeHintMatch(
@@ -793,6 +906,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="Camera",
@@ -909,6 +1026,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="ClimateEntity",
             matches=[
                 TypeHintMatch(
@@ -921,23 +1042,23 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 ),
                 TypeHintMatch(
                     function_name="current_humidity",
-                    return_type=["int", None],
+                    return_type=["float", None],
                 ),
                 TypeHintMatch(
                     function_name="target_humidity",
-                    return_type=["int", None],
+                    return_type=["float", None],
                 ),
                 TypeHintMatch(
                     function_name="hvac_mode",
-                    return_type=["HVACMode", "str", None],
+                    return_type=["HVACMode", None],
                 ),
                 TypeHintMatch(
                     function_name="hvac_modes",
-                    return_type=["list[HVACMode]", "list[str]"],
+                    return_type="list[HVACMode]",
                 ),
                 TypeHintMatch(
                     function_name="hvac_action",
-                    return_type=["HVACAction", "str", None],
+                    return_type=["HVACAction", None],
                 ),
                 TypeHintMatch(
                     function_name="current_temperature",
@@ -1067,11 +1188,11 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 ),
                 TypeHintMatch(
                     function_name="min_humidity",
-                    return_type="int",
+                    return_type="float",
                 ),
                 TypeHintMatch(
                     function_name="max_humidity",
-                    return_type="int",
+                    return_type="float",
                 ),
             ],
         ),
@@ -1080,6 +1201,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="CoverEntity",
@@ -1181,6 +1306,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="BaseTrackerEntity",
             matches=[
                 TypeHintMatch(
@@ -1189,7 +1318,7 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 ),
                 TypeHintMatch(
                     function_name="source_type",
-                    return_type=["SourceType", "str"],
+                    return_type="SourceType",
                 ),
             ],
         ),
@@ -1252,6 +1381,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="ToggleEntity",
@@ -1335,6 +1468,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="GeolocationEvent",
             matches=[
                 TypeHintMatch(
@@ -1360,6 +1497,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="ImageProcessingEntity",
@@ -1405,6 +1546,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="ToggleEntity",
             matches=_TOGGLE_ENTITY_MATCH,
         ),
@@ -1421,11 +1566,11 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 ),
                 TypeHintMatch(
                     function_name="min_humidity",
-                    return_type=["int"],
+                    return_type=["float"],
                 ),
                 TypeHintMatch(
                     function_name="max_humidity",
-                    return_type=["int"],
+                    return_type=["float"],
                 ),
                 TypeHintMatch(
                     function_name="mode",
@@ -1437,7 +1582,7 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 ),
                 TypeHintMatch(
                     function_name="target_humidity",
-                    return_type=["int", None],
+                    return_type=["float", None],
                 ),
                 TypeHintMatch(
                     function_name="set_humidity",
@@ -1458,6 +1603,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="ToggleEntity",
@@ -1559,6 +1708,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="LockEntity",
             matches=[
                 TypeHintMatch(
@@ -1610,43 +1763,14 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             ],
         ),
     ],
-    "mailbox": [
-        ClassTypeHintMatch(
-            base_class="Mailbox",
-            matches=[
-                TypeHintMatch(
-                    function_name="media_type",
-                    return_type="str",
-                ),
-                TypeHintMatch(
-                    function_name="can_delete",
-                    return_type="bool",
-                ),
-                TypeHintMatch(
-                    function_name="has_media",
-                    return_type="bool",
-                ),
-                TypeHintMatch(
-                    function_name="async_get_media",
-                    arg_types={1: "str"},
-                    return_type="bytes",
-                ),
-                TypeHintMatch(
-                    function_name="async_get_messages",
-                    return_type="list[dict[str, Any]]",
-                ),
-                TypeHintMatch(
-                    function_name="async_delete",
-                    arg_types={1: "str"},
-                    return_type="bool",
-                ),
-            ],
-        ),
-    ],
     "media_player": [
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="MediaPlayerEntity",
@@ -1710,7 +1834,7 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 TypeHintMatch(
                     function_name="async_get_browse_image",
                     arg_types={
-                        1: "str",
+                        1: "MediaType | str",
                         2: "str",
                         3: "str | None",
                     },
@@ -1933,7 +2057,7 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 TypeHintMatch(
                     function_name="async_browse_media",
                     arg_types={
-                        1: "str | None",
+                        1: "MediaType | str | None",
                         2: "str | None",
                     },
                     return_type="BrowseMedia",
@@ -1969,7 +2093,7 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=[
                 TypeHintMatch(
                     function_name="targets",
-                    return_type=["dict[str, Any]", None],
+                    return_type=["Mapping[str, Any]", None],
                 ),
                 TypeHintMatch(
                     function_name="send_message",
@@ -2053,6 +2177,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="ToggleEntity",
             matches=_TOGGLE_ENTITY_MATCH,
         ),
@@ -2118,6 +2246,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="SelectEntity",
@@ -2210,6 +2342,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="ToggleEntity",
             matches=_TOGGLE_ENTITY_MATCH,
         ),
@@ -2257,7 +2393,7 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 ),
                 TypeHintMatch(
                     function_name="async_process_audio_stream",
-                    arg_types={1: "SpeechMetadata", 2: "StreamReader"},
+                    arg_types={1: "SpeechMetadata", 2: "AsyncIterable[bytes]"},
                     return_type="SpeechResult",
                 ),
             ],
@@ -2269,6 +2405,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="ToggleEntity",
             matches=_TOGGLE_ENTITY_MATCH,
         ),
@@ -2278,6 +2418,54 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 TypeHintMatch(
                     function_name="device_class",
                     return_type=["SwitchDeviceClass", None],
+                ),
+            ],
+        ),
+    ],
+    "todo": [
+        ClassTypeHintMatch(
+            base_class="Entity",
+            matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="TodoListEntity",
+            matches=[
+                TypeHintMatch(
+                    function_name="todo_items",
+                    return_type=["list[TodoItem]", None],
+                ),
+                TypeHintMatch(
+                    function_name="async_create_todo_item",
+                    arg_types={
+                        1: "TodoItem",
+                    },
+                    return_type="None",
+                ),
+                TypeHintMatch(
+                    function_name="async_update_todo_item",
+                    arg_types={
+                        1: "TodoItem",
+                    },
+                    return_type="None",
+                ),
+                TypeHintMatch(
+                    function_name="async_delete_todo_items",
+                    arg_types={
+                        1: "list[str]",
+                    },
+                    return_type="None",
+                ),
+                TypeHintMatch(
+                    function_name="async_move_todo_item",
+                    arg_types={
+                        1: "str",
+                        2: "str | None",
+                    },
+                    return_type="None",
                 ),
             ],
         ),
@@ -2300,11 +2488,11 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
                 ),
                 TypeHintMatch(
                     function_name="default_options",
-                    return_type=["dict[str, Any]", None],
+                    return_type=["Mapping[str, Any]", None],
                 ),
                 TypeHintMatch(
                     function_name="get_tts_audio",
-                    arg_types={1: "str", 2: "str", 3: "dict[str, Any] | None"},
+                    arg_types={1: "str", 2: "str", 3: "dict[str, Any]"},
                     return_type="TtsAudioType",
                     has_async_counterpart=True,
                 ),
@@ -2378,6 +2566,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="ToggleEntity",
@@ -2515,6 +2707,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
             matches=_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
             base_class="WaterHeaterEntity",
             matches=[
                 TypeHintMatch(
@@ -2594,6 +2790,10 @@ _INHERITANCE_MATCH: dict[str, list[ClassTypeHintMatch]] = {
         ClassTypeHintMatch(
             base_class="Entity",
             matches=_ENTITY_MATCH,
+        ),
+        ClassTypeHintMatch(
+            base_class="RestoreEntity",
+            matches=_RESTORE_ENTITY_MATCH,
         ),
         ClassTypeHintMatch(
             base_class="WeatherEntity",
@@ -2689,6 +2889,10 @@ def _is_valid_type(
     if expected_type == "...":
         return isinstance(node, nodes.Const) and node.value == Ellipsis
 
+    # Special case for an empty list, such as Callable[[], TestServer]
+    if expected_type == "[]":
+        return isinstance(node, nodes.List) and not node.elts
+
     # Special case for `xxx | yyy`
     if match := _TYPE_HINT_MATCHERS["a_or_b"].match(expected_type):
         return (
@@ -2730,7 +2934,7 @@ def _is_valid_type(
             _is_valid_type(match.group(1), node.value)
             and isinstance(node.slice, nodes.Tuple)
             and all(
-                _is_valid_type(match.group(n + 2), node.slice.elts[n])
+                _is_valid_type(match.group(n + 2), node.slice.elts[n], in_return)
                 for n in range(len(node.slice.elts))
             )
         )
@@ -2752,12 +2956,33 @@ def _is_valid_type(
     ):
         return True
 
+    # Special case for int in argument type
+    if (
+        expected_type == "int"
+        and not in_return
+        and isinstance(node, nodes.Name)
+        and node.name in ("float", "int")
+    ):
+        return True
+
+    # Allow subscripts or type aliases for generic types
+    if (
+        isinstance(node, nodes.Subscript)
+        and isinstance(node.value, nodes.Name)
+        and node.value.name in _KNOWN_GENERIC_TYPES
+        or isinstance(node, nodes.Name)
+        and node.name.endswith(_KNOWN_GENERIC_TYPES_TUPLE)
+    ):
+        return True
+
     # Name occurs when a namespace is not used, eg. "HomeAssistant"
     if isinstance(node, nodes.Name) and node.name == expected_type:
         return True
 
     # Attribute occurs when a namespace is used, eg. "core.HomeAssistant"
-    return isinstance(node, nodes.Attribute) and node.attrname == expected_type
+    return isinstance(node, nodes.Attribute) and (
+        node.attrname == expected_type or node.as_string() == expected_type
+    )
 
 
 def _is_valid_return_type(match: TypeHintMatch, node: nodes.NodeNG) -> bool:
@@ -2769,15 +2994,13 @@ def _is_valid_return_type(match: TypeHintMatch, node: nodes.NodeNG) -> bool:
             match, node.right
         )
 
-    if (
-        match.check_return_type_inheritance
-        and isinstance(match.return_type, (str, list))
-        and isinstance(node, nodes.Name)
-    ):
+    if isinstance(match.return_type, (str, list)) and isinstance(node, nodes.Name):
         if isinstance(match.return_type, str):
             valid_types = {match.return_type}
         else:
             valid_types = {el for el in match.return_type if isinstance(el, str)}
+        if "Mapping[str, Any]" in valid_types:
+            valid_types.add("TypedDict")
 
         try:
             for infer_node in node.infer():
@@ -2834,10 +3057,7 @@ def _get_named_annotation(
 def _has_valid_annotations(
     annotations: list[nodes.NodeNG | None],
 ) -> bool:
-    for annotation in annotations:
-        if annotation is not None:
-            return True
-    return False
+    return any(annotation is not None for annotation in annotations)
 
 
 def _get_module_platform(module_name: str) -> str | None:
@@ -2851,7 +3071,7 @@ def _get_module_platform(module_name: str) -> str | None:
     return platform.lstrip(".") if platform else "__init__"
 
 
-class HassTypeHintChecker(BaseChecker):  # type: ignore[misc]
+class HassTypeHintChecker(BaseChecker):
     """Checker for setup type hints."""
 
     name = "hass_enforce_type_hints"
@@ -2867,6 +3087,12 @@ class HassTypeHintChecker(BaseChecker):  # type: ignore[misc]
             "hass-return-type",
             "Used when method return type is incorrect",
         ),
+        "W7433": (
+            "Argument %s is of type %s and could be moved to "
+            "`@pytest.mark.usefixtures` decorator in %s",
+            "hass-consider-usefixtures-decorator",
+            "Used when an argument type is None and could be a fixture",
+        ),
     }
     options = (
         (
@@ -2881,46 +3107,70 @@ class HassTypeHintChecker(BaseChecker):  # type: ignore[misc]
         ),
     )
 
-    def __init__(self, linter: PyLinter | None = None) -> None:
-        """Initialize the HassTypeHintChecker."""
-        super().__init__(linter)
-        self._function_matchers: list[TypeHintMatch] = []
-        self._class_matchers: list[ClassTypeHintMatch] = []
+    _class_matchers: list[ClassTypeHintMatch]
+    _function_matchers: list[TypeHintMatch]
+    _module_node: nodes.Module
+    _module_platform: str | None
+    _in_test_module: bool
 
     def visit_module(self, node: nodes.Module) -> None:
         """Populate matchers for a Module node."""
-        self._function_matchers = []
         self._class_matchers = []
+        self._function_matchers = []
+        self._module_node = node
+        self._module_platform = _get_module_platform(node.name)
+        self._in_test_module = node.name.startswith("tests.")
 
-        if (module_platform := _get_module_platform(node.name)) is None:
+        if self._in_test_module or self._module_platform is None:
             return
 
-        if module_platform in _PLATFORMS:
+        if self._module_platform in _PLATFORMS:
             self._function_matchers.extend(_FUNCTION_MATCH["__any_platform__"])
 
-        if function_matches := _FUNCTION_MATCH.get(module_platform):
+        if function_matches := _FUNCTION_MATCH.get(self._module_platform):
             self._function_matchers.extend(function_matches)
 
-        if class_matches := _CLASS_MATCH.get(module_platform):
+        if class_matches := _CLASS_MATCH.get(self._module_platform):
             self._class_matchers.extend(class_matches)
 
-        if not self.linter.config.ignore_missing_annotations and (
-            property_matches := _INHERITANCE_MATCH.get(module_platform)
-        ):
+        if property_matches := _INHERITANCE_MATCH.get(self._module_platform):
             self._class_matchers.extend(property_matches)
 
         self._class_matchers.reverse()
+
+    def _ignore_function(
+        self, node: nodes.FunctionDef, annotations: list[nodes.NodeNG | None]
+    ) -> bool:
+        """Check if we can skip the function validation."""
+        return (
+            # test modules are excluded from ignore_missing_annotations
+            not self._in_test_module
+            # some modules have checks forced
+            and self._module_platform not in _FORCE_ANNOTATION_PLATFORMS
+            # other modules are only checked ignore_missing_annotations
+            and self.linter.config.ignore_missing_annotations
+            and node.returns is None
+            and not _has_valid_annotations(annotations)
+        )
 
     def visit_classdef(self, node: nodes.ClassDef) -> None:
         """Apply relevant type hint checks on a ClassDef node."""
         ancestor: nodes.ClassDef
         checked_class_methods: set[str] = set()
         ancestors = list(node.ancestors())  # cache result for inside loop
-        for class_matches in self._class_matchers:
+        for class_matcher in self._class_matchers:
+            skip_matcher = False
+            if exclude_base_classes := class_matcher.exclude_base_classes:
+                for ancestor in ancestors:
+                    if ancestor.name in exclude_base_classes:
+                        skip_matcher = True
+                        break
+            if skip_matcher:
+                continue
             for ancestor in ancestors:
-                if ancestor.name == class_matches.base_class:
+                if ancestor.name == class_matcher.base_class:
                     self._visit_class_functions(
-                        node, class_matches.matches, checked_class_methods
+                        node, class_matcher.matches, checked_class_methods
                     )
 
     def _visit_class_functions(
@@ -2932,34 +3182,72 @@ class HassTypeHintChecker(BaseChecker):  # type: ignore[misc]
         cached_methods: list[nodes.FunctionDef] = list(node.mymethods())
         for match in matches:
             for function_node in cached_methods:
-                if function_node.name in checked_class_methods:
+                if (
+                    function_node.name in checked_class_methods
+                    or not match.need_to_check_function(function_node)
+                ):
                     continue
-                if match.need_to_check_function(function_node):
-                    self._check_function(function_node, match)
-                    checked_class_methods.add(function_node.name)
+
+                annotations = _get_all_annotations(function_node)
+                if self._ignore_function(function_node, annotations):
+                    continue
+
+                self._check_function(function_node, match, annotations)
+                checked_class_methods.add(function_node.name)
 
     def visit_functiondef(self, node: nodes.FunctionDef) -> None:
         """Apply relevant type hint checks on a FunctionDef node."""
-        for match in self._function_matchers:
-            if not match.need_to_check_function(node) or node.is_method():
+        annotations = _get_all_annotations(node)
+        if self._ignore_function(node, annotations):
+            return
+
+        # Check method or function matchers.
+        if node.is_method():
+            matchers = _METHOD_MATCH
+        else:
+            if self._in_test_module and node.parent is self._module_node:
+                if node.name.startswith("test_"):
+                    self._check_test_function(node, False)
+                    return
+                if (decoratornames := node.decoratornames()) and (
+                    # `@pytest.fixture`
+                    "_pytest.fixtures.fixture" in decoratornames
+                    # `@pytest.fixture(...)`
+                    or "_pytest.fixtures.FixtureFunctionMarker" in decoratornames
+                ):
+                    self._check_test_function(node, True)
+                    return
+            matchers = self._function_matchers
+
+        # Check that common arguments are correctly typed.
+        for arg_name, expected_type in _COMMON_ARGUMENTS.items():
+            arg_node, annotation = _get_named_annotation(node, arg_name)
+            if arg_node and not _is_valid_type(expected_type, annotation):
+                self.add_message(
+                    "hass-argument-type",
+                    node=arg_node,
+                    args=(arg_name, expected_type, node.name),
+                )
+
+        for match in matchers:
+            if not match.need_to_check_function(node):
                 continue
-            self._check_function(node, match)
+            self._check_function(node, match, annotations)
 
     visit_asyncfunctiondef = visit_functiondef
 
-    def _check_function(self, node: nodes.FunctionDef, match: TypeHintMatch) -> None:
-        # Check that at least one argument is annotated.
-        annotations = _get_all_annotations(node)
-        if (
-            self.linter.config.ignore_missing_annotations
-            and node.returns is None
-            and not _has_valid_annotations(annotations)
-        ):
-            return
-
+    def _check_function(
+        self,
+        node: nodes.FunctionDef,
+        match: TypeHintMatch,
+        annotations: list[nodes.NodeNG | None],
+    ) -> None:
         # Check that all positional arguments are correctly annotated.
         if match.arg_types:
             for key, expected_type in match.arg_types.items():
+                if node.args.args[key].name in _COMMON_ARGUMENTS:
+                    # It has already been checked, avoid double-message
+                    continue
                 if not _is_valid_type(expected_type, annotations[key]):
                     self.add_message(
                         "hass-argument-type",
@@ -2970,6 +3258,9 @@ class HassTypeHintChecker(BaseChecker):  # type: ignore[misc]
         # Check that all keyword arguments are correctly annotated.
         if match.named_arg_types is not None:
             for arg_name, expected_type in match.named_arg_types.items():
+                if arg_name in _COMMON_ARGUMENTS:
+                    # It has already been checked, avoid double-message
+                    continue
                 arg_node, annotation = _get_named_annotation(node, arg_name)
                 if arg_node and not _is_valid_type(expected_type, annotation):
                     self.add_message(
@@ -2995,6 +3286,30 @@ class HassTypeHintChecker(BaseChecker):  # type: ignore[misc]
                 node=node,
                 args=(match.return_type or "None", node.name),
             )
+
+    def _check_test_function(self, node: nodes.FunctionDef, is_fixture: bool) -> None:
+        # Check the return type, should always be `None` for test_*** functions.
+        if not is_fixture and not _is_valid_type(None, node.returns, True):
+            self.add_message(
+                "hass-return-type",
+                node=node,
+                args=("None", node.name),
+            )
+        # Check that all positional arguments are correctly annotated.
+        for arg_name, expected_type in _TEST_FIXTURES.items():
+            arg_node, annotation = _get_named_annotation(node, arg_name)
+            if arg_node and expected_type == "None" and not is_fixture:
+                self.add_message(
+                    "hass-consider-usefixtures-decorator",
+                    node=arg_node,
+                    args=(arg_name, expected_type, node.name),
+                )
+            if arg_node and not _is_valid_type(expected_type, annotation):
+                self.add_message(
+                    "hass-argument-type",
+                    node=arg_node,
+                    args=(arg_name, expected_type, node.name),
+                )
 
 
 def register(linter: PyLinter) -> None:

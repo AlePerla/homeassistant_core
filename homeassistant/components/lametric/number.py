@@ -1,4 +1,5 @@
 """Support for LaMetric numbers."""
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
@@ -9,9 +10,8 @@ from demetriek import Device, LaMetricDevice
 
 from homeassistant.components.number import NumberEntity, NumberEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -20,26 +20,20 @@ from .entity import LaMetricEntity
 from .helpers import lametric_exception_handler
 
 
-@dataclass
-class LaMetricEntityDescriptionMixin:
-    """Mixin values for LaMetric entities."""
+@dataclass(frozen=True, kw_only=True)
+class LaMetricNumberEntityDescription(NumberEntityDescription):
+    """Class describing LaMetric number entities."""
 
     value_fn: Callable[[Device], int | None]
+    has_fn: Callable[[Device], bool] = lambda device: True
     set_value_fn: Callable[[LaMetricDevice, float], Awaitable[Any]]
-
-
-@dataclass
-class LaMetricNumberEntityDescription(
-    NumberEntityDescription, LaMetricEntityDescriptionMixin
-):
-    """Class describing LaMetric number entities."""
 
 
 NUMBERS = [
     LaMetricNumberEntityDescription(
         key="brightness",
+        translation_key="brightness",
         name="Brightness",
-        icon="mdi:brightness-6",
         entity_category=EntityCategory.CONFIG,
         native_step=1,
         native_min_value=0,
@@ -50,13 +44,14 @@ NUMBERS = [
     ),
     LaMetricNumberEntityDescription(
         key="volume",
+        translation_key="volume",
         name="Volume",
-        icon="mdi:volume-high",
         entity_category=EntityCategory.CONFIG,
         native_step=1,
         native_min_value=0,
         native_max_value=100,
-        value_fn=lambda device: device.audio.volume,
+        has_fn=lambda device: bool(device.audio and device.audio.available),
+        value_fn=lambda device: device.audio.volume if device.audio else 0,
         set_value_fn=lambda api, volume: api.audio(volume=int(volume)),
     ),
 ]

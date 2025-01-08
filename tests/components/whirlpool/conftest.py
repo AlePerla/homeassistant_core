@@ -1,4 +1,5 @@
 """Fixtures for the Whirlpool Sixth Sense integration tests."""
+
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,10 +16,23 @@ MOCK_SAID4 = "said4"
 
 @pytest.fixture(
     name="region",
-    params=[("EU", Region.EU, Brand.Whirlpool), ("US", Region.US, Brand.Maytag)],
+    params=[("EU", Region.EU), ("US", Region.US)],
 )
-def fixture_region(request):
+def fixture_region(request: pytest.FixtureRequest) -> tuple[str, Region]:
     """Return a region for input."""
+    return request.param
+
+
+@pytest.fixture(
+    name="brand",
+    params=[
+        ("Whirlpool", Brand.Whirlpool),
+        ("KitchenAid", Brand.KitchenAid),
+        ("Maytag", Brand.Maytag),
+    ],
+)
+def fixture_brand(request: pytest.FixtureRequest) -> tuple[str, Brand]:
+    """Return a brand for input."""
     return request.param
 
 
@@ -42,6 +56,21 @@ def fixture_mock_appliances_manager_api():
             {"SAID": MOCK_SAID1, "NAME": "TestZone"},
             {"SAID": MOCK_SAID2, "NAME": "TestZone"},
         ]
+        mock_appliances_manager.return_value.washer_dryers = [
+            {"SAID": MOCK_SAID3, "NAME": "washer"},
+            {"SAID": MOCK_SAID4, "NAME": "dryer"},
+        ]
+        yield mock_appliances_manager
+
+
+@pytest.fixture(name="mock_appliances_manager_laundry_api")
+def fixture_mock_appliances_manager_laundry_api():
+    """Set up AppliancesManager fixture."""
+    with mock.patch(
+        "homeassistant.components.whirlpool.AppliancesManager"
+    ) as mock_appliances_manager:
+        mock_appliances_manager.return_value.fetch_appliances = AsyncMock()
+        mock_appliances_manager.return_value.aircons = None
         mock_appliances_manager.return_value.washer_dryers = [
             {"SAID": MOCK_SAID3, "NAME": "washer"},
             {"SAID": MOCK_SAID4, "NAME": "dryer"},
@@ -115,8 +144,8 @@ def side_effect_function(*args, **kwargs):
         return "0"
     if args[0] == "WashCavity_OpStatusBulkDispense1Level":
         return "3"
-    if args[0] == "Cavity_TimeStatusEstTimeRemaining":
-        return "4000"
+
+    return None
 
 
 def get_sensor_mock(said):
@@ -141,13 +170,13 @@ def get_sensor_mock(said):
 
 
 @pytest.fixture(name="mock_sensor1_api", autouse=False)
-def fixture_mock_sensor1_api(mock_auth_api, mock_appliances_manager_api):
+def fixture_mock_sensor1_api(mock_auth_api, mock_appliances_manager_laundry_api):
     """Set up sensor API fixture."""
     return get_sensor_mock(MOCK_SAID3)
 
 
 @pytest.fixture(name="mock_sensor2_api", autouse=False)
-def fixture_mock_sensor2_api(mock_auth_api, mock_appliances_manager_api):
+def fixture_mock_sensor2_api(mock_auth_api, mock_appliances_manager_laundry_api):
     """Set up sensor API fixture."""
     return get_sensor_mock(MOCK_SAID4)
 
@@ -159,6 +188,8 @@ def fixture_mock_sensor_api_instances(mock_sensor1_api, mock_sensor2_api):
         "homeassistant.components.whirlpool.sensor.WasherDryer"
     ) as mock_sensor_api:
         mock_sensor_api.side_effect = [
+            mock_sensor1_api,
+            mock_sensor2_api,
             mock_sensor1_api,
             mock_sensor2_api,
         ]

@@ -1,4 +1,5 @@
 """Support for Rheem EcoNet water heaters."""
+
 from __future__ import annotations
 
 from pyeconet.equipment import Equipment, EquipmentType
@@ -13,15 +14,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS,
+    EntityCategory,
     UnitOfEnergy,
     UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import EcoNetEntity
 from .const import DOMAIN, EQUIPMENT
+from .entity import EcoNetEntity
 
 SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(

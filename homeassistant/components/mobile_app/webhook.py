@@ -1,10 +1,11 @@
 """Webhook handlers for mobile_app."""
+
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
-from functools import wraps
+from functools import lru_cache, wraps
 from http import HTTPStatus
 import logging
 import secrets
@@ -43,6 +44,7 @@ from homeassistant.const import (
     CONF_NAME,
     CONF_UNIQUE_ID,
     CONF_WEBHOOK_ID,
+    EntityCategory,
 )
 from homeassistant.core import EventOrigin, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceNotFound, TemplateError
@@ -53,7 +55,6 @@ from homeassistant.helpers import (
     template,
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.util.decorator import Registry
 
 from .const import (
@@ -99,7 +100,6 @@ from .const import (
     DATA_DEVICES,
     DOMAIN,
     ERR_ENCRYPTION_ALREADY_ENABLED,
-    ERR_ENCRYPTION_NOT_AVAILABLE,
     ERR_ENCRYPTION_REQUIRED,
     ERR_INVALID_FORMAT,
     ERR_SENSOR_NOT_REGISTERED,
@@ -108,13 +108,12 @@ from .const import (
     SIGNAL_SENSOR_UPDATE,
 )
 from .helpers import (
-    _decrypt_payload,
-    _decrypt_payload_legacy,
+    decrypt_payload,
+    decrypt_payload_legacy,
     empty_okay_response,
     error_response,
     registration_context,
     safe_registration,
-    supports_encryption,
     webhook_response,
 )
 
@@ -128,12 +127,29 @@ WEBHOOK_COMMANDS: Registry[
 
 SENSOR_TYPES = (ATTR_SENSOR_TYPE_BINARY_SENSOR, ATTR_SENSOR_TYPE_SENSOR)
 
-WEBHOOK_PAYLOAD_SCHEMA = vol.Schema(
+WEBHOOK_PAYLOAD_SCHEMA = vol.Any(
+    vol.Schema(
+        {
+            vol.Required(ATTR_WEBHOOK_TYPE): cv.string,
+            vol.Optional(ATTR_WEBHOOK_DATA): vol.Any(dict, list),
+        }
+    ),
+    vol.Schema(
+        {
+            vol.Required(ATTR_WEBHOOK_TYPE): cv.string,
+            vol.Required(ATTR_WEBHOOK_ENCRYPTED): True,
+            vol.Optional(ATTR_WEBHOOK_ENCRYPTED_DATA): cv.string,
+        }
+    ),
+)
+
+SENSOR_SCHEMA_FULL = vol.Schema(
     {
-        vol.Required(ATTR_WEBHOOK_TYPE): cv.string,
-        vol.Required(ATTR_WEBHOOK_DATA, default={}): vol.Any(dict, list),
-        vol.Optional(ATTR_WEBHOOK_ENCRYPTED, default=False): cv.boolean,
-        vol.Optional(ATTR_WEBHOOK_ENCRYPTED_DATA): cv.string,
+        vol.Optional(ATTR_SENSOR_ATTRIBUTES, default={}): dict,
+        vol.Optional(ATTR_SENSOR_ICON, default="mdi:cellphone"): vol.Any(None, cv.icon),
+        vol.Required(ATTR_SENSOR_STATE): vol.Any(None, bool, int, float, str),
+        vol.Required(ATTR_SENSOR_TYPE): vol.In(SENSOR_TYPES),
+        vol.Required(ATTR_SENSOR_UNIQUE_ID): cv.string,
     }
 )
 
@@ -201,19 +217,19 @@ async def handle_webhook(
 
     webhook_type = req_data[ATTR_WEBHOOK_TYPE]
 
-    webhook_payload = req_data.get(ATTR_WEBHOOK_DATA, {})
+    webhook_payload = None
 
-    if req_data[ATTR_WEBHOOK_ENCRYPTED]:
+    if ATTR_WEBHOOK_ENCRYPTED in req_data:
         enc_data = req_data[ATTR_WEBHOOK_ENCRYPTED_DATA]
         try:
-            webhook_payload = _decrypt_payload(config_entry.data[CONF_SECRET], enc_data)
+            webhook_payload = decrypt_payload(config_entry.data[CONF_SECRET], enc_data)
             if ATTR_NO_LEGACY_ENCRYPTION not in config_entry.data:
                 data = {**config_entry.data, ATTR_NO_LEGACY_ENCRYPTION: True}
                 hass.config_entries.async_update_entry(config_entry, data=data)
         except CryptoError:
             if ATTR_NO_LEGACY_ENCRYPTION not in config_entry.data:
                 try:
-                    webhook_payload = _decrypt_payload_legacy(
+                    webhook_payload = decrypt_payload_legacy(
                         config_entry.data[CONF_SECRET], enc_data
                     )
                 except CryptoError:
@@ -221,11 +237,16 @@ async def handle_webhook(
                         "Ignoring encrypted payload because unable to decrypt"
                     )
                 except ValueError:
-                    _LOGGER.warning("Ignoring invalid encrypted payload")
+                    _LOGGER.warning("Ignoring invalid JSON in encrypted payload")
             else:
                 _LOGGER.warning("Ignoring encrypted payload because unable to decrypt")
-        except ValueError:
-            _LOGGER.warning("Ignoring invalid encrypted payload")
+        except ValueError as err:
+            _LOGGER.warning("Ignoring invalid JSON in encrypted payload: %s", err)
+    else:
+        webhook_payload = req_data.get(ATTR_WEBHOOK_DATA, {})
+
+    if webhook_payload is None:
+        return empty_okay_response()
 
     if webhook_type not in WEBHOOK_COMMANDS:
         _LOGGER.error(
@@ -275,7 +296,7 @@ async def webhook_call_service(
             config_entry.data[ATTR_DEVICE_NAME],
             ex,
         )
-        raise HTTPBadRequest() from ex
+        raise HTTPBadRequest from ex
 
     return empty_okay_response()
 
@@ -353,6 +374,12 @@ async def webhook_stream_camera(
     return webhook_response(resp, registration=config_entry.data)
 
 
+@lru_cache
+def _cached_template(template_str: str, hass: HomeAssistant) -> template.Template:
+    """Return a cached template."""
+    return template.Template(template_str, hass)
+
+
 @WEBHOOK_COMMANDS.register("render_template")
 @validate_schema(
     {
@@ -369,7 +396,7 @@ async def webhook_render_template(
     resp = {}
     for key, item in data.items():
         try:
-            tpl = template.Template(item[ATTR_TEMPLATE], hass)
+            tpl = _cached_template(item[ATTR_TEMPLATE], hass)
             resp[key] = tpl.async_render(item.get(ATTR_TEMPLATE_VARIABLES))
         except TemplateError as ex:
             resp[key] = {"error": str(ex)}
@@ -379,18 +406,20 @@ async def webhook_render_template(
 
 @WEBHOOK_COMMANDS.register("update_location")
 @validate_schema(
-    vol.Schema(
+    vol.All(
         cv.key_dependency(ATTR_GPS, ATTR_GPS_ACCURACY),
-        {
-            vol.Optional(ATTR_LOCATION_NAME): cv.string,
-            vol.Optional(ATTR_GPS): cv.gps,
-            vol.Optional(ATTR_GPS_ACCURACY): cv.positive_int,
-            vol.Optional(ATTR_BATTERY): cv.positive_int,
-            vol.Optional(ATTR_SPEED): cv.positive_int,
-            vol.Optional(ATTR_ALTITUDE): vol.Coerce(float),
-            vol.Optional(ATTR_COURSE): cv.positive_int,
-            vol.Optional(ATTR_VERTICAL_ACCURACY): cv.positive_int,
-        },
+        vol.Schema(
+            {
+                vol.Optional(ATTR_LOCATION_NAME): cv.string,
+                vol.Optional(ATTR_GPS): cv.gps,
+                vol.Optional(ATTR_GPS_ACCURACY): cv.positive_int,
+                vol.Optional(ATTR_BATTERY): cv.positive_int,
+                vol.Optional(ATTR_SPEED): cv.positive_int,
+                vol.Optional(ATTR_ALTITUDE): vol.Coerce(float),
+                vol.Optional(ATTR_COURSE): cv.positive_int,
+                vol.Optional(ATTR_VERTICAL_ACCURACY): cv.positive_int,
+            },
+        ),
     )
 )
 async def webhook_update_location(
@@ -454,13 +483,6 @@ async def webhook_enable_encryption(
         return error_response(
             ERR_ENCRYPTION_ALREADY_ENABLED, "Encryption already enabled"
         )
-
-    if not supports_encryption():
-        _LOGGER.warning(
-            "Unable to enable encryption for %s because libsodium is unavailable!",
-            config_entry.data[ATTR_DEVICE_NAME],
-        )
-        return error_response(ERR_ENCRYPTION_NOT_AVAILABLE, "Encryption is unavailable")
 
     secret = secrets.token_hex(SecretBox.KEY_SIZE)
 
@@ -579,12 +601,12 @@ async def webhook_register_sensor(
         if changes:
             entity_registry.async_update_entity(existing_sensor, **changes)
 
-        async_dispatcher_send(hass, SIGNAL_SENSOR_UPDATE, unique_store_key, data)
+        async_dispatcher_send(hass, f"{SIGNAL_SENSOR_UPDATE}-{unique_store_key}", data)
     else:
         data[CONF_UNIQUE_ID] = unique_store_key
-        data[
-            CONF_NAME
-        ] = f"{config_entry.data[ATTR_DEVICE_NAME]} {data[ATTR_SENSOR_NAME]}"
+        data[CONF_NAME] = (
+            f"{config_entry.data[ATTR_DEVICE_NAME]} {data[ATTR_SENSOR_NAME]}"
+        )
 
         register_signal = f"{DOMAIN}_{data[ATTR_SENSOR_TYPE]}_register"
         async_dispatcher_send(hass, register_signal, data)
@@ -618,18 +640,6 @@ async def webhook_update_sensor_states(
     hass: HomeAssistant, config_entry: ConfigEntry, data: list[dict[str, Any]]
 ) -> Response:
     """Handle an update sensor states webhook."""
-    sensor_schema_full = vol.Schema(
-        {
-            vol.Optional(ATTR_SENSOR_ATTRIBUTES, default={}): dict,
-            vol.Optional(ATTR_SENSOR_ICON, default="mdi:cellphone"): vol.Any(
-                None, cv.icon
-            ),
-            vol.Required(ATTR_SENSOR_STATE): vol.Any(None, bool, int, float, str),
-            vol.Required(ATTR_SENSOR_TYPE): vol.In(SENSOR_TYPES),
-            vol.Required(ATTR_SENSOR_UNIQUE_ID): cv.string,
-        }
-    )
-
     device_name: str = config_entry.data[ATTR_DEVICE_NAME]
     resp: dict[str, Any] = {}
     entity_registry = er.async_get(hass)
@@ -659,7 +669,7 @@ async def webhook_update_sensor_states(
             continue
 
         try:
-            sensor = sensor_schema_full(sensor)
+            sensor = SENSOR_SCHEMA_FULL(sensor)
         except vol.Invalid as err:
             err_msg = vol.humanize.humanize_error(sensor, err)
             _LOGGER.error(
@@ -677,8 +687,7 @@ async def webhook_update_sensor_states(
         sensor[CONF_WEBHOOK_ID] = config_entry.data[CONF_WEBHOOK_ID]
         async_dispatcher_send(
             hass,
-            SIGNAL_SENSOR_UPDATE,
-            unique_store_key,
+            f"{SIGNAL_SENSOR_UPDATE}-{unique_store_key}",
             sensor,
         )
 
@@ -712,10 +721,15 @@ async def webhook_get_config(
     """Handle a get config webhook."""
     hass_config = hass.config.as_dict()
 
+    device: dr.DeviceEntry = hass.data[DOMAIN][DATA_DEVICES][
+        config_entry.data[CONF_WEBHOOK_ID]
+    ]
+
     resp = {
         "latitude": hass_config["latitude"],
         "longitude": hass_config["longitude"],
         "elevation": hass_config["elevation"],
+        "hass_device_id": device.id,
         "unit_system": hass_config["unit_system"],
         "location_name": hass_config["location_name"],
         "time_zone": hass_config["time_zone"],
@@ -728,7 +742,7 @@ async def webhook_get_config(
         resp[CONF_CLOUDHOOK_URL] = config_entry.data[CONF_CLOUDHOOK_URL]
 
     if cloud.async_active_subscription(hass):
-        with suppress(hass.components.cloud.CloudNotAvailable):
+        with suppress(cloud.CloudNotAvailable):
             resp[CONF_REMOTE_UI_URL] = cloud.async_remote_ui_url(hass)
 
     webhook_id = config_entry.data[CONF_WEBHOOK_ID]

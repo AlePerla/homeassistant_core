@@ -11,8 +11,8 @@ from homeassistant.components.button import (
     ButtonEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -31,18 +31,11 @@ async def async_setup_entry(
     )
 
 
-@dataclass
-class StarlinkButtonEntityDescriptionMixin:
-    """Mixin for required keys."""
+@dataclass(frozen=True, kw_only=True)
+class StarlinkButtonEntityDescription(ButtonEntityDescription):
+    """Describes a Starlink button entity."""
 
     press_fn: Callable[[StarlinkUpdateCoordinator], Awaitable[None]]
-
-
-@dataclass
-class StarlinkButtonEntityDescription(
-    ButtonEntityDescription, StarlinkButtonEntityDescriptionMixin
-):
-    """Describes a Starlink button entity."""
 
 
 class StarlinkButtonEntity(StarlinkEntity, ButtonEntity):
@@ -58,7 +51,6 @@ class StarlinkButtonEntity(StarlinkEntity, ButtonEntity):
 BUTTONS = [
     StarlinkButtonEntityDescription(
         key="reboot",
-        name="Reboot",
         device_class=ButtonDeviceClass.RESTART,
         entity_category=EntityCategory.DIAGNOSTIC,
         press_fn=lambda coordinator: coordinator.async_reboot_starlink(),

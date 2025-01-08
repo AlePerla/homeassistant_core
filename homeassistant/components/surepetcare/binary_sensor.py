@@ -1,4 +1,5 @@
 """Support for Sure PetCare Flaps/Pets binary sensors."""
+
 from __future__ import annotations
 
 from typing import cast
@@ -12,12 +13,12 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import SurePetcareDataCoordinator
 from .const import DOMAIN
+from .coordinator import SurePetcareDataCoordinator
 from .entity import SurePetcareEntity
 
 

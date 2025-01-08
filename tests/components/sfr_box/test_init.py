@@ -1,4 +1,5 @@
 """Test the SFR Box setup process."""
+
 from collections.abc import Generator
 from unittest.mock import patch
 
@@ -11,13 +12,13 @@ from homeassistant.core import HomeAssistant
 
 
 @pytest.fixture(autouse=True)
-def override_platforms() -> Generator[None, None, None]:
+def override_platforms() -> Generator[None]:
     """Override PLATFORMS."""
     with patch("homeassistant.components.sfr_box.PLATFORMS", []):
         yield
 
 
-@pytest.mark.usefixtures("system_get_info", "dsl_get_info")
+@pytest.mark.usefixtures("system_get_info", "dsl_get_info", "wan_get_info")
 async def test_setup_unload_entry(
     hass: HomeAssistant, config_entry: ConfigEntry
 ) -> None:

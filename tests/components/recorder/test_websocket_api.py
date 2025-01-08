@@ -1,22 +1,30 @@
 """The tests for sensor recorder platform."""
-# pylint: disable=invalid-name
+
 import datetime
 from datetime import timedelta
 from statistics import fmean
-import threading
+import sys
 from unittest.mock import ANY, patch
 
 from freezegun import freeze_time
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 
 from homeassistant.components import recorder
+from homeassistant.components.recorder import Recorder
 from homeassistant.components.recorder.db_schema import Statistics, StatisticsShortTerm
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    get_latest_short_term_statistics_with_session,
     get_metadata,
+    get_short_term_statistics_run_cache,
     list_statistic_ids,
 )
+from homeassistant.components.recorder.util import session_scope
+from homeassistant.components.recorder.websocket_api import UNIT_SCHEMA
+from homeassistant.components.sensor import UNIT_CONVERTERS
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import recorder as recorder_helper
 from homeassistant.setup import async_setup_component
 import homeassistant.util.dt as dt_util
@@ -27,11 +35,32 @@ from .common import (
     async_wait_recording_done,
     create_engine_test,
     do_adhoc_statistics,
+    get_start_time,
     statistics_during_period,
 )
+from .conftest import InstrumentedMigration
 
 from tests.common import async_fire_time_changed
+from tests.typing import RecorderInstanceGenerator, WebSocketGenerator
 
+
+@pytest.fixture
+async def mock_recorder_before_hass(
+    async_setup_recorder_instance: RecorderInstanceGenerator,
+) -> None:
+    """Set up recorder."""
+
+
+AREA_SENSOR_FT_ATTRIBUTES = {
+    "device_class": "area",
+    "state_class": "measurement",
+    "unit_of_measurement": "ft²",
+}
+AREA_SENSOR_M_ATTRIBUTES = {
+    "device_class": "area",
+    "state_class": "measurement",
+    "unit_of_measurement": "m²",
+}
 DISTANCE_SENSOR_FT_ATTRIBUTES = {
     "device_class": "distance",
     "state_class": "measurement",
@@ -124,23 +153,38 @@ VOLUME_SENSOR_M3_ATTRIBUTES_TOTAL = {
 }
 
 
-async def test_statistics_during_period(recorder_mock, hass, hass_ws_client):
+def test_converters_align_with_sensor() -> None:
+    """Ensure UNIT_SCHEMA is aligned with sensor UNIT_CONVERTERS."""
+    for converter in UNIT_CONVERTERS.values():
+        assert converter.UNIT_CLASS in UNIT_SCHEMA.schema
+
+    for unit_class in UNIT_SCHEMA.schema:
+        assert any(c for c in UNIT_CONVERTERS.values() if unit_class == c.UNIT_CLASS)
+
+
+async def test_statistics_during_period(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test statistics_during_period."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
 
     hass.config.units = US_CUSTOMARY_SYSTEM
     await async_setup_component(hass, "sensor", {})
     await async_recorder_block_till_done(hass)
-    hass.states.async_set("sensor.test", 10, attributes=POWER_SENSOR_KW_ATTRIBUTES)
+    hass.states.async_set(
+        "sensor.test",
+        10,
+        attributes=POWER_SENSOR_KW_ATTRIBUTES,
+        timestamp=now.timestamp(),
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, start=now)
     await async_wait_recording_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "end_time": now.isoformat(),
@@ -152,9 +196,8 @@ async def test_statistics_during_period(recorder_mock, hass, hass_ws_client):
     assert response["success"]
     assert response["result"] == {}
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -172,15 +215,12 @@ async def test_statistics_during_period(recorder_mock, hass, hass_ws_client):
                 "min": pytest.approx(10),
                 "max": pytest.approx(10),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ]
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 3,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -201,17 +241,15 @@ async def test_statistics_during_period(recorder_mock, hass, hass_ws_client):
     }
 
 
-@freeze_time(datetime.datetime(2022, 10, 21, 7, 25, tzinfo=datetime.timezone.utc))
-@pytest.mark.parametrize("offset", (0, 1, 2))
-async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offset):
+@pytest.mark.freeze_time(datetime.datetime(2022, 10, 21, 7, 25, tzinfo=datetime.UTC))
+@pytest.mark.parametrize("offset", [0, 1, 2])
+async def test_statistic_during_period(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    offset,
+) -> None:
     """Test statistic_during_period."""
-    id = 1
-
-    def next_id():
-        nonlocal id
-        id += 1
-        return id
-
     now = dt_util.utcnow()
 
     await async_recorder_block_till_done(hass)
@@ -230,7 +268,7 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
             "min": -76 + i * 2,
             "sum": i,
         }
-        for i in range(0, 39)
+        for i in range(39)
     ]
     imported_stats = []
     slice_end = 12 - offset
@@ -243,7 +281,7 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
             "sum": imported_stats_5min[slice_end - 1]["sum"],
         }
     )
-    for i in range(0, 2):
+    for i in range(2):
         slice_start = i * 12 + (12 - offset)
         slice_end = (i + 1) * 12 + (12 - offset)
         assert imported_stats_5min[slice_start]["start"].minute == 0
@@ -284,10 +322,16 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     )
     await async_wait_recording_done(hass)
 
+    metadata = get_metadata(hass, statistic_ids={"sensor.test"})
+    metadata_id = metadata["sensor.test"][0]
+    run_cache = get_short_term_statistics_run_cache(hass)
+    # Verify the import of the short term statistics
+    # also updates the run cache
+    assert run_cache.get_latest_ids({metadata_id}) is not None
+
     # No data for this period yet
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "fixed_period": {
                 "start_time": now.isoformat(),
@@ -306,9 +350,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     }
 
     # This should include imported_statistics_5min[:]
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
         }
@@ -331,9 +374,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
         dt_util.parse_datetime("2022-10-21T07:15:00+00:00")
         + timedelta(minutes=5 * offset)
     ).isoformat()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "fixed_period": {
@@ -360,9 +402,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
         dt_util.parse_datetime("2022-10-21T08:20:00+00:00")
         + timedelta(minutes=5 * offset)
     ).isoformat()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "fixed_period": {
@@ -386,9 +427,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
         + timedelta(minutes=5 * offset)
     ).isoformat()
     assert imported_stats_5min[26]["start"].isoformat() == start_time
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "fixed_period": {
                 "start_time": start_time,
@@ -410,9 +450,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
         dt_util.parse_datetime("2022-10-21T06:09:00+00:00")
         + timedelta(minutes=5 * offset)
     ).isoformat()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "fixed_period": {
                 "start_time": start_time,
@@ -435,9 +474,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
         + timedelta(minutes=5 * offset)
     ).isoformat()
     assert imported_stats_5min[26]["start"].isoformat() == end_time
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "fixed_period": {
                 "end_time": end_time,
@@ -465,9 +503,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
         + timedelta(minutes=5 * offset)
     ).isoformat()
     assert imported_stats_5min[32]["start"].isoformat() == end_time
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "fixed_period": {
                 "start_time": start_time,
@@ -489,9 +526,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     start_time = "2022-10-21T06:00:00+00:00"
     assert imported_stats_5min[24 - offset]["start"].isoformat() == start_time
     assert imported_stats[2]["start"].isoformat() == start_time
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "fixed_period": {
                 "start_time": start_time,
@@ -510,9 +546,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     }
 
     # This should also include imported_statistics[2:] + imported_statistics_5min[36:]
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "rolling_window": {
                 "duration": {"hours": 1, "minutes": 25},
@@ -531,9 +566,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     }
 
     # This should include imported_statistics[2:3]
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "rolling_window": {
                 "duration": {"hours": 1},
@@ -557,9 +591,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     }
 
     # Test we can get only selected types
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "types": ["max", "change"],
@@ -573,9 +606,8 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     }
 
     # Test we can convert units
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "units": {"energy": "MWh"},
@@ -592,10 +624,14 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
     }
 
     # Test we can automatically convert units
-    hass.states.async_set("sensor.test", None, attributes=ENERGY_SENSOR_WH_ATTRIBUTES)
-    await client.send_json(
+    hass.states.async_set(
+        "sensor.test",
+        None,
+        attributes=ENERGY_SENSOR_WH_ATTRIBUTES,
+        timestamp=now.timestamp(),
+    )
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
         }
@@ -609,17 +645,39 @@ async def test_statistic_during_period(recorder_mock, hass, hass_ws_client, offs
         "change": (imported_stats_5min[-1]["sum"] - imported_stats_5min[0]["sum"])
         * 1000,
     }
+    with session_scope(hass=hass, read_only=True) as session:
+        stats = get_latest_short_term_statistics_with_session(
+            hass,
+            session,
+            {"sensor.test"},
+            {"last_reset", "max", "mean", "min", "state", "sum"},
+        )
+    start = imported_stats_5min[-1]["start"].timestamp()
+    end = start + (5 * 60)
+    assert stats == {
+        "sensor.test": [
+            {
+                "end": end,
+                "last_reset": None,
+                "start": start,
+                "state": None,
+                "sum": 38.0,
+            }
+        ]
+    }
 
 
-@freeze_time(datetime.datetime(2022, 10, 21, 7, 25, tzinfo=datetime.timezone.utc))
-async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client):
+@pytest.mark.freeze_time(datetime.datetime(2022, 10, 21, 7, 25, tzinfo=datetime.UTC))
+async def test_statistic_during_period_hole(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test statistic_during_period when there are holes in the data."""
-    id = 1
+    stat_id = 1
 
     def next_id():
-        nonlocal id
-        id += 1
-        return id
+        nonlocal stat_id
+        stat_id += 1
+        return stat_id
 
     now = dt_util.utcnow()
 
@@ -637,7 +695,7 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
             "min": -76 + i * 2,
             "sum": i,
         }
-        for i in range(0, 6)
+        for i in range(6)
     ]
 
     imported_metadata = {
@@ -657,9 +715,8 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
     await async_wait_recording_done(hass)
 
     # This should include imported_stats[:]
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
         }
@@ -678,9 +735,8 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
     end_time = "2022-10-21T05:00:00+00:00"
     assert imported_stats[0]["start"].isoformat() == start_time
     assert imported_stats[-1]["start"].isoformat() < end_time
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "fixed_period": {
@@ -701,9 +757,8 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
     # This should also include imported_stats[:]
     start_time = "2022-10-20T13:00:00+00:00"
     end_time = "2022-10-21T08:20:00+00:00"
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "fixed_period": {
@@ -726,9 +781,8 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
     end_time = "2022-10-20T23:00:00+00:00"
     assert imported_stats[1]["start"].isoformat() == start_time
     assert imported_stats[3]["start"].isoformat() < end_time
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "fixed_period": {
@@ -751,9 +805,8 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
     end_time = "2022-10-21T00:00:00+00:00"
     assert imported_stats[1]["start"].isoformat() > start_time
     assert imported_stats[3]["start"].isoformat() < end_time
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": next_id(),
             "type": "recorder/statistic_during_period",
             "statistic_id": "sensor.test",
             "fixed_period": {
@@ -772,10 +825,351 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
     }
 
 
-@freeze_time(datetime.datetime(2022, 10, 21, 7, 25, tzinfo=datetime.timezone.utc))
 @pytest.mark.parametrize(
-    "calendar_period, start_time, end_time",
-    (
+    "frozen_time",
+    [
+        # This is the normal case, all statistics runs are available
+        datetime.datetime(2022, 10, 21, 6, 31, tzinfo=datetime.UTC),
+        # Statistic only available up until 6:25, this can happen if
+        # core has been shut down for an hour
+        datetime.datetime(2022, 10, 21, 7, 31, tzinfo=datetime.UTC),
+    ],
+)
+async def test_statistic_during_period_partial_overlap(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    freezer: FrozenDateTimeFactory,
+    frozen_time: datetime.datetime,
+) -> None:
+    """Test statistic_during_period."""
+    client = await hass_ws_client()
+
+    freezer.move_to(frozen_time)
+    now = dt_util.utcnow()
+
+    await async_recorder_block_till_done(hass)
+
+    zero = now
+    start = zero.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Sum shall be tracking a hypothetical sensor that is 0 at midnight, and grows by 1 per minute.
+    # The test will have 4 hours of LTS-only data (0:00-3:59:59), followed by 2 hours of overlapping STS/LTS (4:00-5:59:59), followed by 30 minutes of STS only (6:00-6:29:59)
+    # similar to how a real recorder might look after purging STS.
+
+    # The datapoint at i=0 (start = 0:00) will be 60 as that is the growth during the hour starting at the start period
+    imported_stats_hours = [
+        {
+            "start": (start + timedelta(hours=i)),
+            "min": i * 60,
+            "max": i * 60 + 60,
+            "mean": i * 60 + 30,
+            "sum": (i + 1) * 60,
+        }
+        for i in range(6)
+    ]
+
+    # The datapoint at i=0 (start = 4:00) would be the sensor's value at t=4:05, or 245
+    imported_stats_5min = [
+        {
+            "start": (start + timedelta(hours=4, minutes=5 * i)),
+            "min": 4 * 60 + i * 5,
+            "max": 4 * 60 + i * 5 + 5,
+            "mean": 4 * 60 + i * 5 + 2.5,
+            "sum": 4 * 60 + (i + 1) * 5,
+        }
+        for i in range(30)
+    ]
+
+    assert imported_stats_hours[-1]["sum"] == 360
+    assert imported_stats_hours[-1]["start"] == start.replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    assert imported_stats_5min[-1]["sum"] == 390
+    assert imported_stats_5min[-1]["start"] == start.replace(
+        hour=6, minute=25, second=0, microsecond=0
+    )
+
+    statId = "sensor.test_overlapping"
+    imported_metadata = {
+        "has_mean": False,
+        "has_sum": True,
+        "name": "Total imported energy overlapping",
+        "source": "recorder",
+        "statistic_id": statId,
+        "unit_of_measurement": "kWh",
+    }
+
+    recorder.get_instance(hass).async_import_statistics(
+        imported_metadata,
+        imported_stats_hours,
+        Statistics,
+    )
+    recorder.get_instance(hass).async_import_statistics(
+        imported_metadata,
+        imported_stats_5min,
+        StatisticsShortTerm,
+    )
+    await async_wait_recording_done(hass)
+
+    metadata = get_metadata(hass, statistic_ids={statId})
+    metadata_id = metadata[statId][0]
+    run_cache = get_short_term_statistics_run_cache(hass)
+    # Verify the import of the short term statistics
+    # also updates the run cache
+    assert run_cache.get_latest_ids({metadata_id}) is not None
+
+    # Get all the stats, should consider all hours and 5mins
+    await client.send_json_auto_id(
+        {
+            "type": "recorder/statistic_during_period",
+            "statistic_id": statId,
+        }
+    )
+    response = await client.receive_json()
+    assert response["success"]
+    assert response["result"] == {
+        "change": 390,
+        "max": 390,
+        "min": 0,
+        "mean": 195,
+    }
+
+    async def assert_stat_during_fixed(client, start_time, end_time, expect):
+        json = {
+            "type": "recorder/statistic_during_period",
+            "types": list(expect.keys()),
+            "statistic_id": statId,
+            "fixed_period": {},
+        }
+        if start_time:
+            json["fixed_period"]["start_time"] = start_time.isoformat()
+        if end_time:
+            json["fixed_period"]["end_time"] = end_time.isoformat()
+
+        await client.send_json_auto_id(json)
+        response = await client.receive_json()
+        assert response["success"]
+        assert response["result"] == expect
+
+    # One hours worth of growth in LTS-only
+    start_time = start.replace(hour=1)
+    end_time = start.replace(hour=2)
+    await assert_stat_during_fixed(
+        client, start_time, end_time, {"change": 60, "min": 60, "max": 120, "mean": 90}
+    )
+
+    # Five minutes of growth in STS-only
+    start_time = start.replace(hour=6, minute=15)
+    end_time = start.replace(hour=6, minute=20)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 5,
+            "min": 6 * 60 + 15,
+            "max": 6 * 60 + 20,
+            "mean": 6 * 60 + (15 + 20) / 2,
+        },
+    )
+
+    # Six minutes of growth in STS-only
+    start_time = start.replace(hour=6, minute=14)
+    end_time = start.replace(hour=6, minute=20)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 5,
+            "min": 6 * 60 + 15,
+            "max": 6 * 60 + 20,
+            "mean": 6 * 60 + (15 + 20) / 2,
+        },
+    )
+
+    # Six minutes of growth in STS-only
+    # 5-minute Change includes start times exactly on or before a statistics start, but end times are not counted unless they are greater than start.
+    start_time = start.replace(hour=6, minute=15)
+    end_time = start.replace(hour=6, minute=21)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 10,
+            "min": 6 * 60 + 15,
+            "max": 6 * 60 + 25,
+            "mean": 6 * 60 + (15 + 25) / 2,
+        },
+    )
+
+    # Five minutes of growth in overlapping LTS+STS
+    start_time = start.replace(hour=5, minute=15)
+    end_time = start.replace(hour=5, minute=20)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 5,
+            "min": 5 * 60 + 15,
+            "max": 5 * 60 + 20,
+            "mean": 5 * 60 + (15 + 20) / 2,
+        },
+    )
+
+    # Five minutes of growth in overlapping LTS+STS (start of hour)
+    start_time = start.replace(hour=5, minute=0)
+    end_time = start.replace(hour=5, minute=5)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": 5, "min": 5 * 60, "max": 5 * 60 + 5, "mean": 5 * 60 + (5) / 2},
+    )
+
+    # Five minutes of growth in overlapping LTS+STS (end of hour)
+    start_time = start.replace(hour=4, minute=55)
+    end_time = start.replace(hour=5, minute=0)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 5,
+            "min": 4 * 60 + 55,
+            "max": 5 * 60,
+            "mean": 4 * 60 + (55 + 60) / 2,
+        },
+    )
+
+    # Five minutes of growth in STS-only, with a minute offset. Despite that this does not cover the full period, result is still 5
+    start_time = start.replace(hour=6, minute=16)
+    end_time = start.replace(hour=6, minute=21)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 5,
+            "min": 6 * 60 + 20,
+            "max": 6 * 60 + 25,
+            "mean": 6 * 60 + (20 + 25) / 2,
+        },
+    )
+
+    # 7 minutes of growth in STS-only, spanning two intervals
+    start_time = start.replace(hour=6, minute=14)
+    end_time = start.replace(hour=6, minute=21)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 10,
+            "min": 6 * 60 + 15,
+            "max": 6 * 60 + 25,
+            "mean": 6 * 60 + (15 + 25) / 2,
+        },
+    )
+
+    # One hours worth of growth in LTS-only, with arbitrary minute offsets
+    # Since this does not fully cover the hour, result is None?
+    start_time = start.replace(hour=1, minute=40)
+    end_time = start.replace(hour=2, minute=12)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": None, "min": None, "max": None, "mean": None},
+    )
+
+    # One hours worth of growth in LTS-only, with arbitrary minute offsets, covering a whole 1-hour period
+    start_time = start.replace(hour=1, minute=40)
+    end_time = start.replace(hour=3, minute=12)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": 60, "min": 120, "max": 180, "mean": 150},
+    )
+
+    # 90 minutes of growth in window overlapping LTS+STS/STS-only (4:41 - 6:11)
+    start_time = start.replace(hour=4, minute=41)
+    end_time = start_time + timedelta(minutes=90)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {
+            "change": 90,
+            "min": 4 * 60 + 45,
+            "max": 4 * 60 + 45 + 90,
+            "mean": 4 * 60 + 45 + 45,
+        },
+    )
+
+    # 4 hours of growth in overlapping LTS-only/LTS+STS (2:01-6:01)
+    start_time = start.replace(hour=2, minute=1)
+    end_time = start_time + timedelta(minutes=240)
+    # 60 from LTS (3:00-3:59), 125 from STS (25 intervals) (4:00-6:01)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": 185, "min": 3 * 60, "max": 3 * 60 + 185, "mean": 3 * 60 + 185 / 2},
+    )
+
+    # 4 hours of growth in overlapping LTS-only/LTS+STS (1:31-5:31)
+    start_time = start.replace(hour=1, minute=31)
+    end_time = start_time + timedelta(minutes=240)
+    # 120 from LTS (2:00-3:59), 95 from STS (19 intervals) 4:00-5:31
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": 215, "min": 2 * 60, "max": 2 * 60 + 215, "mean": 2 * 60 + 215 / 2},
+    )
+
+    # 5 hours of growth, start time only (1:31-end)
+    start_time = start.replace(hour=1, minute=31)
+    end_time = None
+    # will be actually 2:00 - end
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": 4 * 60 + 30, "min": 120, "max": 390, "mean": (390 + 120) / 2},
+    )
+
+    # 5 hours of growth, end_time_only (0:00-5:00)
+    start_time = None
+    end_time = start.replace(hour=5)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": 5 * 60, "min": 0, "max": 5 * 60, "mean": (5 * 60) / 2},
+    )
+
+    # 5 hours 1 minute of growth, end_time_only (0:00-5:01)
+    start_time = None
+    end_time = start.replace(hour=5, minute=1)
+    # 4 hours LTS, 1 hour and 5 minutes STS (4:00-5:01)
+    await assert_stat_during_fixed(
+        client,
+        start_time,
+        end_time,
+        {"change": 5 * 60 + 5, "min": 0, "max": 5 * 60 + 5, "mean": (5 * 60 + 5) / 2},
+    )
+
+
+@pytest.mark.freeze_time(datetime.datetime(2022, 10, 21, 7, 25, tzinfo=datetime.UTC))
+@pytest.mark.parametrize(
+    ("calendar_period", "start_time", "end_time"),
+    [
         (
             {"period": "hour"},
             "2022-10-21T07:00:00+00:00",
@@ -826,11 +1220,16 @@ async def test_statistic_during_period_hole(recorder_mock, hass, hass_ws_client)
             "2021-01-01T08:00:00+00:00",
             "2022-01-01T08:00:00+00:00",
         ),
-    ),
+    ],
 )
 async def test_statistic_during_period_calendar(
-    recorder_mock, hass, hass_ws_client, calendar_period, start_time, end_time
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    calendar_period,
+    start_time,
+    end_time,
+) -> None:
     """Test statistic_during_period."""
     client = await hass_ws_client()
 
@@ -839,9 +1238,8 @@ async def test_statistic_during_period_calendar(
         "homeassistant.components.recorder.websocket_api.statistic_during_period",
         return_value={},
     ) as statistic_during_period:
-        await client.send_json(
+        await client.send_json_auto_id(
             {
-                "id": 1,
                 "type": "recorder/statistic_during_period",
                 "calendar": calendar_period,
                 "statistic_id": "sensor.test",
@@ -857,8 +1255,11 @@ async def test_statistic_during_period_calendar(
 
 
 @pytest.mark.parametrize(
-    "attributes, state, value, custom_units, converted_value",
+    ("attributes", "state", "value", "custom_units", "converted_value"),
     [
+        (AREA_SENSOR_M_ATTRIBUTES, 10, 10, {"area": "cm²"}, 100000),
+        (AREA_SENSOR_M_ATTRIBUTES, 10, 10, {"area": "m²"}, 10),
+        (AREA_SENSOR_M_ATTRIBUTES, 10, 10, {"area": "ft²"}, 107.639),
         (DISTANCE_SENSOR_M_ATTRIBUTES, 10, 10, {"distance": "cm"}, 1000),
         (DISTANCE_SENSOR_M_ATTRIBUTES, 10, 10, {"distance": "m"}, 10),
         (DISTANCE_SENSOR_M_ATTRIBUTES, 10, 10, {"distance": "in"}, 10 / 0.0254),
@@ -878,21 +1279,23 @@ async def test_statistic_during_period_calendar(
     ],
 )
 async def test_statistics_during_period_unit_conversion(
-    recorder_mock,
-    hass,
-    hass_ws_client,
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
     attributes,
     state,
     value,
     custom_units,
     converted_value,
-):
+) -> None:
     """Test statistics_during_period."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
 
     await async_setup_component(hass, "sensor", {})
     await async_recorder_block_till_done(hass)
-    hass.states.async_set("sensor.test", state, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", state, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, start=now)
@@ -901,9 +1304,8 @@ async def test_statistics_during_period_unit_conversion(
     client = await hass_ws_client()
 
     # Query in state unit
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -921,16 +1323,13 @@ async def test_statistics_during_period_unit_conversion(
                 "min": pytest.approx(value),
                 "max": pytest.approx(value),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ]
     }
 
     # Query in custom unit
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -949,15 +1348,13 @@ async def test_statistics_during_period_unit_conversion(
                 "min": pytest.approx(converted_value),
                 "max": pytest.approx(converted_value),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ]
     }
 
 
 @pytest.mark.parametrize(
-    "attributes, state, value, custom_units, converted_value",
+    ("attributes", "state", "value", "custom_units", "converted_value"),
     [
         (ENERGY_SENSOR_KWH_ATTRIBUTES, 10, 10, {"energy": "kWh"}, 10),
         (ENERGY_SENSOR_KWH_ATTRIBUTES, 10, 10, {"energy": "MWh"}, 0.010),
@@ -969,22 +1366,26 @@ async def test_statistics_during_period_unit_conversion(
     ],
 )
 async def test_sum_statistics_during_period_unit_conversion(
-    recorder_mock,
-    hass,
-    hass_ws_client,
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
     attributes,
     state,
     value,
     custom_units,
     converted_value,
-):
+) -> None:
     """Test statistics_during_period."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
 
     await async_setup_component(hass, "sensor", {})
     await async_recorder_block_till_done(hass)
-    hass.states.async_set("sensor.test", 0, attributes=attributes)
-    hass.states.async_set("sensor.test", state, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", 0, attributes=attributes, timestamp=now.timestamp()
+    )
+    hass.states.async_set(
+        "sensor.test", state, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, start=now)
@@ -993,9 +1394,8 @@ async def test_sum_statistics_during_period_unit_conversion(
     client = await hass_ws_client()
 
     # Query in state unit
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1009,9 +1409,7 @@ async def test_sum_statistics_during_period_unit_conversion(
             {
                 "start": int(now.timestamp() * 1000),
                 "end": int((now + timedelta(minutes=5)).timestamp() * 1000),
-                "mean": None,
-                "min": None,
-                "max": None,
+                "change": pytest.approx(value),
                 "last_reset": None,
                 "state": pytest.approx(value),
                 "sum": pytest.approx(value),
@@ -1020,9 +1418,8 @@ async def test_sum_statistics_during_period_unit_conversion(
     }
 
     # Query in custom unit
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1037,9 +1434,7 @@ async def test_sum_statistics_during_period_unit_conversion(
             {
                 "start": int(now.timestamp() * 1000),
                 "end": int((now + timedelta(minutes=5)).timestamp() * 1000),
-                "mean": None,
-                "min": None,
-                "max": None,
+                "change": pytest.approx(converted_value),
                 "last_reset": None,
                 "state": pytest.approx(converted_value),
                 "sum": pytest.approx(converted_value),
@@ -1052,6 +1447,7 @@ async def test_sum_statistics_during_period_unit_conversion(
     "custom_units",
     [
         {"distance": "L"},
+        {"area": "L"},
         {"energy": "W"},
         {"power": "Pa"},
         {"pressure": "K"},
@@ -1060,8 +1456,11 @@ async def test_sum_statistics_during_period_unit_conversion(
     ],
 )
 async def test_statistics_during_period_invalid_unit_conversion(
-    recorder_mock, hass, hass_ws_client, custom_units
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    custom_units,
+) -> None:
     """Test statistics_during_period."""
     now = dt_util.utcnow()
 
@@ -1071,11 +1470,11 @@ async def test_statistics_during_period_invalid_unit_conversion(
     client = await hass_ws_client()
 
     # Query in state unit
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
+            "statistic_ids": ["sensor.test"],
             "period": "5minute",
         }
     )
@@ -1084,11 +1483,11 @@ async def test_statistics_during_period_invalid_unit_conversion(
     assert response["result"] == {}
 
     # Query in custom unit
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
+            "statistic_ids": ["sensor.test"],
             "period": "5minute",
             "units": custom_units,
         }
@@ -1099,11 +1498,11 @@ async def test_statistics_during_period_invalid_unit_conversion(
 
 
 async def test_statistics_during_period_in_the_past(
-    recorder_mock, hass, hass_ws_client
-):
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test statistics_during_period in the past."""
-    hass.config.set_time_zone("UTC")
-    now = dt_util.utcnow().replace()
+    await hass.config.async_set_time_zone("UTC")
+    now = get_start_time(dt_util.utcnow())
 
     hass.config.units = US_CUSTOMARY_SYSTEM
     await async_setup_component(hass, "sensor", {})
@@ -1124,9 +1523,8 @@ async def test_statistics_during_period_in_the_past(
     await async_wait_recording_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "end_time": now.isoformat(),
@@ -1138,9 +1536,8 @@ async def test_statistics_during_period_in_the_past(
     assert response["success"]
     assert response["result"] == {}
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1152,9 +1549,8 @@ async def test_statistics_during_period_in_the_past(
     assert response["result"] == {}
 
     past = now - timedelta(days=3, hours=1)
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 3,
             "type": "recorder/statistics_during_period",
             "start_time": past.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1172,16 +1568,13 @@ async def test_statistics_during_period_in_the_past(
                 "min": pytest.approx(10),
                 "max": pytest.approx(10),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ]
     }
 
     start_of_day = stats_top_of_hour.replace(hour=0, minute=0)
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 4,
             "type": "recorder/statistics_during_period",
             "start_time": stats_top_of_hour.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1199,15 +1592,12 @@ async def test_statistics_during_period_in_the_past(
                 "min": pytest.approx(10),
                 "max": pytest.approx(10),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ]
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 5,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1220,15 +1610,15 @@ async def test_statistics_during_period_in_the_past(
 
 
 async def test_statistics_during_period_bad_start_time(
-    recorder_mock, hass, hass_ws_client
-):
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test statistics_during_period."""
     client = await hass_ws_client()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": "cats",
+            "statistic_ids": ["sensor.test"],
             "period": "5minute",
         }
     )
@@ -1238,18 +1628,18 @@ async def test_statistics_during_period_bad_start_time(
 
 
 async def test_statistics_during_period_bad_end_time(
-    recorder_mock, hass, hass_ws_client
-):
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test statistics_during_period."""
     now = dt_util.utcnow()
 
     client = await hass_ws_client()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "end_time": "dogs",
+            "statistic_ids": ["sensor.test"],
             "period": "5minute",
         }
     )
@@ -1258,9 +1648,52 @@ async def test_statistics_during_period_bad_end_time(
     assert response["error"]["code"] == "invalid_end_time"
 
 
+async def test_statistics_during_period_no_statistic_ids(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """Test statistics_during_period without passing statistic_ids."""
+    now = dt_util.utcnow()
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "recorder/statistics_during_period",
+            "start_time": now.isoformat(),
+            "end_time": (now + timedelta(seconds=1)).isoformat(),
+            "period": "5minute",
+        }
+    )
+    response = await client.receive_json()
+    assert not response["success"]
+    assert response["error"]["code"] == "invalid_format"
+
+
+async def test_statistics_during_period_empty_statistic_ids(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """Test statistics_during_period with passing an empty list of statistic_ids."""
+    now = dt_util.utcnow()
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "recorder/statistics_during_period",
+            "start_time": now.isoformat(),
+            "statistic_ids": [],
+            "end_time": (now + timedelta(seconds=1)).isoformat(),
+            "period": "5minute",
+        }
+    )
+    response = await client.receive_json()
+    assert not response["success"]
+    assert response["error"]["code"] == "invalid_format"
+
+
 @pytest.mark.parametrize(
-    "units, attributes, display_unit, statistics_unit, unit_class",
+    ("units", "attributes", "display_unit", "statistics_unit", "unit_class"),
     [
+        (US_CUSTOMARY_SYSTEM, AREA_SENSOR_M_ATTRIBUTES, "m²", "m²", "area"),
+        (METRIC_SYSTEM, AREA_SENSOR_M_ATTRIBUTES, "m²", "m²", "area"),
         (US_CUSTOMARY_SYSTEM, DISTANCE_SENSOR_M_ATTRIBUTES, "m", "m", "distance"),
         (METRIC_SYSTEM, DISTANCE_SENSOR_M_ATTRIBUTES, "m", "m", "distance"),
         (
@@ -1316,17 +1749,17 @@ async def test_statistics_during_period_bad_end_time(
     ],
 )
 async def test_list_statistic_ids(
-    recorder_mock,
-    hass,
-    hass_ws_client,
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
     units,
     attributes,
     display_unit,
     statistics_unit,
     unit_class,
-):
+) -> None:
     """Test list_statistic_ids."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
     has_mean = attributes["state_class"] == "measurement"
     has_sum = not has_mean
 
@@ -1335,15 +1768,17 @@ async def test_list_statistic_ids(
     await async_recorder_block_till_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json({"id": 1, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == []
 
-    hass.states.async_set("sensor.test", 10, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", 10, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
-    await client.send_json({"id": 2, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1365,7 +1800,7 @@ async def test_list_statistic_ids(
     hass.states.async_remove("sensor.test")
     await hass.async_block_till_done()
 
-    await client.send_json({"id": 3, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1381,14 +1816,14 @@ async def test_list_statistic_ids(
         }
     ]
 
-    await client.send_json(
-        {"id": 4, "type": "recorder/list_statistic_ids", "statistic_type": "dogs"}
+    await client.send_json_auto_id(
+        {"type": "recorder/list_statistic_ids", "statistic_type": "dogs"}
     )
     response = await client.receive_json()
     assert not response["success"]
 
-    await client.send_json(
-        {"id": 5, "type": "recorder/list_statistic_ids", "statistic_type": "mean"}
+    await client.send_json_auto_id(
+        {"type": "recorder/list_statistic_ids", "statistic_type": "mean"}
     )
     response = await client.receive_json()
     assert response["success"]
@@ -1408,8 +1843,8 @@ async def test_list_statistic_ids(
     else:
         assert response["result"] == []
 
-    await client.send_json(
-        {"id": 6, "type": "recorder/list_statistic_ids", "statistic_type": "sum"}
+    await client.send_json_auto_id(
+        {"type": "recorder/list_statistic_ids", "statistic_type": "sum"}
     )
     response = await client.receive_json()
     assert response["success"]
@@ -1431,8 +1866,15 @@ async def test_list_statistic_ids(
 
 
 @pytest.mark.parametrize(
-    "attributes, attributes2, display_unit, statistics_unit, unit_class",
+    ("attributes", "attributes2", "display_unit", "statistics_unit", "unit_class"),
     [
+        (
+            AREA_SENSOR_M_ATTRIBUTES,
+            AREA_SENSOR_FT_ATTRIBUTES,
+            "ft²",
+            "m²",
+            "area",
+        ),
         (
             DISTANCE_SENSOR_M_ATTRIBUTES,
             DISTANCE_SENSOR_FT_ATTRIBUTES,
@@ -1480,17 +1922,17 @@ async def test_list_statistic_ids(
     ],
 )
 async def test_list_statistic_ids_unit_change(
-    recorder_mock,
-    hass,
-    hass_ws_client,
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
     attributes,
     attributes2,
     display_unit,
     statistics_unit,
     unit_class,
-):
+) -> None:
     """Test list_statistic_ids."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
     has_mean = attributes["state_class"] == "measurement"
     has_sum = not has_mean
 
@@ -1498,18 +1940,20 @@ async def test_list_statistic_ids_unit_change(
     await async_recorder_block_till_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json({"id": 1, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == []
 
-    hass.states.async_set("sensor.test", 10, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", 10, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, start=now)
     await async_recorder_block_till_done(hass)
 
-    await client.send_json({"id": 2, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1526,9 +1970,11 @@ async def test_list_statistic_ids_unit_change(
     ]
 
     # Change the state unit
-    hass.states.async_set("sensor.test", 10, attributes=attributes2)
+    hass.states.async_set(
+        "sensor.test", 10, attributes=attributes2, timestamp=now.timestamp()
+    )
 
-    await client.send_json({"id": 3, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1545,19 +1991,13 @@ async def test_list_statistic_ids_unit_change(
     ]
 
 
-async def test_validate_statistics(recorder_mock, hass, hass_ws_client):
+async def test_validate_statistics(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test validate_statistics can be called."""
-    id = 1
-
-    def next_id():
-        nonlocal id
-        id += 1
-        return id
 
     async def assert_validation_result(client, expected_result):
-        await client.send_json(
-            {"id": next_id(), "type": "recorder/validate_statistics"}
-        )
+        await client.send_json_auto_id({"type": "recorder/validate_statistics"})
         response = await client.receive_json()
         assert response["success"]
         assert response["result"] == expected_result
@@ -1567,9 +2007,23 @@ async def test_validate_statistics(recorder_mock, hass, hass_ws_client):
     await assert_validation_result(client, {})
 
 
-async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
+async def test_update_statistics_issues(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """Test update_statistics_issues can be called."""
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id({"type": "recorder/update_statistics_issues"})
+    response = await client.receive_json()
+    assert response["success"]
+    assert response["result"] is None
+
+
+async def test_clear_statistics(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test removing statistics."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
 
     units = METRIC_SYSTEM
     attributes = POWER_SENSOR_KW_ATTRIBUTES
@@ -1579,20 +2033,26 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
     hass.config.units = units
     await async_setup_component(hass, "sensor", {})
     await async_recorder_block_till_done(hass)
-    hass.states.async_set("sensor.test1", state, attributes=attributes)
-    hass.states.async_set("sensor.test2", state * 2, attributes=attributes)
-    hass.states.async_set("sensor.test3", state * 3, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test1", state, attributes=attributes, timestamp=now.timestamp()
+    )
+    hass.states.async_set(
+        "sensor.test2", state * 2, attributes=attributes, timestamp=now.timestamp()
+    )
+    hass.states.async_set(
+        "sensor.test3", state * 3, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, start=now)
     await async_recorder_block_till_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
+            "statistic_ids": ["sensor.test1", "sensor.test2", "sensor.test3"],
             "period": "5minute",
         }
     )
@@ -1607,8 +2067,6 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
                 "min": pytest.approx(value),
                 "max": pytest.approx(value),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ],
         "sensor.test2": [
@@ -1619,8 +2077,6 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
                 "min": pytest.approx(value * 2),
                 "max": pytest.approx(value * 2),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ],
         "sensor.test3": [
@@ -1631,16 +2087,13 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
                 "min": pytest.approx(value * 3),
                 "max": pytest.approx(value * 3),
                 "last_reset": None,
-                "state": None,
-                "sum": None,
             }
         ],
     }
     assert response["result"] == expected_response
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/clear_statistics",
             "statistic_ids": ["sensor.test"],
         }
@@ -1650,10 +2103,10 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
     await async_recorder_block_till_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 3,
             "type": "recorder/statistics_during_period",
+            "statistic_ids": ["sensor.test1", "sensor.test2", "sensor.test3"],
             "start_time": now.isoformat(),
             "period": "5minute",
         }
@@ -1662,9 +2115,8 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
     assert response["success"]
     assert response["result"] == expected_response
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 4,
             "type": "recorder/clear_statistics",
             "statistic_ids": ["sensor.test1", "sensor.test3"],
         }
@@ -1674,10 +2126,10 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
     await async_recorder_block_till_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 5,
             "type": "recorder/statistics_during_period",
+            "statistic_ids": ["sensor.test1", "sensor.test2", "sensor.test3"],
             "start_time": now.isoformat(),
             "period": "5minute",
         }
@@ -1687,15 +2139,44 @@ async def test_clear_statistics(recorder_mock, hass, hass_ws_client):
     assert response["result"] == {"sensor.test2": expected_response["sensor.test2"]}
 
 
+async def test_clear_statistics_time_out(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """Test removing statistics with time-out error."""
+    client = await hass_ws_client()
+
+    with (
+        patch.object(recorder.tasks.ClearStatisticsTask, "run"),
+        patch.object(recorder.websocket_api, "CLEAR_STATISTICS_TIME_OUT", 0),
+    ):
+        await client.send_json_auto_id(
+            {
+                "type": "recorder/clear_statistics",
+                "statistic_ids": ["sensor.test"],
+            }
+        )
+        response = await client.receive_json()
+    assert not response["success"]
+    assert response["error"] == {
+        "code": "timeout",
+        "message": "clear_statistics timed out",
+    }
+
+
 @pytest.mark.parametrize(
-    "new_unit, new_unit_class, new_display_unit",
+    ("new_unit", "new_unit_class", "new_display_unit"),
     [("dogs", None, "dogs"), (None, "unitless", None), ("W", "power", "kW")],
 )
 async def test_update_statistics_metadata(
-    recorder_mock, hass, hass_ws_client, new_unit, new_unit_class, new_display_unit
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    new_unit,
+    new_unit_class,
+    new_display_unit,
+) -> None:
     """Test removing statistics."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
 
     units = METRIC_SYSTEM
     attributes = POWER_SENSOR_KW_ATTRIBUTES | {"device_class": None}
@@ -1704,7 +2185,9 @@ async def test_update_statistics_metadata(
     hass.config.units = units
     await async_setup_component(hass, "sensor", {})
     await async_recorder_block_till_done(hass)
-    hass.states.async_set("sensor.test", state, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", state, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, period="hourly", start=now)
@@ -1712,7 +2195,7 @@ async def test_update_statistics_metadata(
 
     client = await hass_ws_client()
 
-    await client.send_json({"id": 1, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1728,9 +2211,8 @@ async def test_update_statistics_metadata(
         }
     ]
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/update_statistics_metadata",
             "statistic_id": "sensor.test",
             "unit_of_measurement": new_unit,
@@ -1740,7 +2222,7 @@ async def test_update_statistics_metadata(
     assert response["success"]
     await async_recorder_block_till_done(hass)
 
-    await client.send_json({"id": 3, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1756,9 +2238,8 @@ async def test_update_statistics_metadata(
         }
     ]
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 5,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1777,16 +2258,41 @@ async def test_update_statistics_metadata(
                 "mean": 10.0,
                 "min": 10.0,
                 "start": int(now.timestamp() * 1000),
-                "state": None,
-                "sum": None,
             }
         ],
     }
 
 
-async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
+async def test_update_statistics_metadata_time_out(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """Test update statistics metadata with time-out error."""
+    client = await hass_ws_client()
+
+    with (
+        patch.object(recorder.tasks.UpdateStatisticsMetadataTask, "run"),
+        patch.object(recorder.websocket_api, "UPDATE_STATISTICS_METADATA_TIME_OUT", 0),
+    ):
+        await client.send_json_auto_id(
+            {
+                "type": "recorder/update_statistics_metadata",
+                "statistic_id": "sensor.test",
+                "unit_of_measurement": "dogs",
+            }
+        )
+        response = await client.receive_json()
+    assert not response["success"]
+    assert response["error"] == {
+        "code": "timeout",
+        "message": "update_statistics_metadata timed out",
+    }
+
+
+async def test_change_statistics_unit(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test change unit of recorded statistics."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
 
     units = METRIC_SYSTEM
     attributes = POWER_SENSOR_KW_ATTRIBUTES | {"device_class": None}
@@ -1795,7 +2301,9 @@ async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
     hass.config.units = units
     await async_setup_component(hass, "sensor", {})
     await async_recorder_block_till_done(hass)
-    hass.states.async_set("sensor.test", state, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", state, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, period="hourly", start=now)
@@ -1803,7 +2311,7 @@ async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
 
     client = await hass_ws_client()
 
-    await client.send_json({"id": 1, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1819,9 +2327,8 @@ async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
         }
     ]
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1839,15 +2346,12 @@ async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
                 "mean": 10.0,
                 "min": 10.0,
                 "start": int(now.timestamp() * 1000),
-                "state": None,
-                "sum": None,
             }
         ],
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 3,
             "type": "recorder/change_statistics_unit",
             "statistic_id": "sensor.test",
             "new_unit_of_measurement": "W",
@@ -1858,7 +2362,7 @@ async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
     assert response["success"]
     await async_recorder_block_till_done(hass)
 
-    await client.send_json({"id": 4, "type": "recorder/list_statistic_ids"})
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == [
@@ -1874,9 +2378,8 @@ async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
         }
     ]
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 5,
             "type": "recorder/statistics_during_period",
             "start_time": now.isoformat(),
             "statistic_ids": ["sensor.test"],
@@ -1895,19 +2398,48 @@ async def test_change_statistics_unit(recorder_mock, hass, hass_ws_client):
                 "mean": 10000.0,
                 "min": 10000.0,
                 "start": int(now.timestamp() * 1000),
-                "state": None,
-                "sum": None,
             }
         ],
     }
 
+    # Changing to the same unit is allowed but does nothing
+    await client.send_json_auto_id(
+        {
+            "type": "recorder/change_statistics_unit",
+            "statistic_id": "sensor.test",
+            "new_unit_of_measurement": "W",
+            "old_unit_of_measurement": "W",
+        }
+    )
+    response = await client.receive_json()
+    assert response["success"]
+    await async_recorder_block_till_done(hass)
+
+    await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
+    response = await client.receive_json()
+    assert response["success"]
+    assert response["result"] == [
+        {
+            "statistic_id": "sensor.test",
+            "display_unit_of_measurement": "kW",
+            "has_mean": True,
+            "has_sum": False,
+            "name": None,
+            "source": "recorder",
+            "statistics_unit_of_measurement": "W",
+            "unit_class": "power",
+        }
+    ]
+
 
 async def test_change_statistics_unit_errors(
-    recorder_mock, hass, hass_ws_client, caplog
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Test change unit of recorded statistics."""
-    now = dt_util.utcnow()
-    ws_id = 0
+    now = get_start_time(dt_util.utcnow())
 
     units = METRIC_SYSTEM
     attributes = POWER_SENSOR_KW_ATTRIBUTES | {"device_class": None}
@@ -1935,26 +2467,19 @@ async def test_change_statistics_unit_errors(
                 "mean": 10.0,
                 "min": 10.0,
                 "start": int(now.timestamp() * 1000),
-                "state": None,
-                "sum": None,
             }
         ],
     }
 
     async def assert_statistic_ids(expected):
-        nonlocal ws_id
-        ws_id += 1
-        await client.send_json({"id": ws_id, "type": "recorder/list_statistic_ids"})
+        await client.send_json_auto_id({"type": "recorder/list_statistic_ids"})
         response = await client.receive_json()
         assert response["success"]
         assert response["result"] == expected
 
     async def assert_statistics(expected):
-        nonlocal ws_id
-        ws_id += 1
-        await client.send_json(
+        await client.send_json_auto_id(
             {
-                "id": ws_id,
                 "type": "recorder/statistics_during_period",
                 "start_time": now.isoformat(),
                 "statistic_ids": ["sensor.test"],
@@ -1968,7 +2493,9 @@ async def test_change_statistics_unit_errors(
     hass.config.units = units
     await async_setup_component(hass, "sensor", {})
     await async_recorder_block_till_done(hass)
-    hass.states.async_set("sensor.test", state, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", state, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
     do_adhoc_statistics(hass, period="hourly", start=now)
@@ -1980,10 +2507,8 @@ async def test_change_statistics_unit_errors(
     await assert_statistics(expected_statistics)
 
     # Try changing to an invalid unit
-    ws_id += 1
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": ws_id,
             "type": "recorder/change_statistics_unit",
             "statistic_id": "sensor.test",
             "old_unit_of_measurement": "kW",
@@ -2000,10 +2525,8 @@ async def test_change_statistics_unit_errors(
     await assert_statistics(expected_statistics)
 
     # Try changing from the wrong unit
-    ws_id += 1
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": ws_id,
             "type": "recorder/change_statistics_unit",
             "statistic_id": "sensor.test",
             "old_unit_of_measurement": "W",
@@ -2020,14 +2543,16 @@ async def test_change_statistics_unit_errors(
     await assert_statistics(expected_statistics)
 
 
-async def test_recorder_info(recorder_mock, hass, hass_ws_client):
+async def test_recorder_info(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test getting recorder status."""
     client = await hass_ws_client()
 
     # Ensure there are no queued events
     await async_wait_recording_done(hass)
 
-    await client.send_json({"id": 1, "type": "recorder/info"})
+    await client.send_json_auto_id({"type": "recorder/info"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == {
@@ -2040,23 +2565,27 @@ async def test_recorder_info(recorder_mock, hass, hass_ws_client):
     }
 
 
-async def test_recorder_info_no_recorder(hass, hass_ws_client):
+async def test_recorder_info_no_recorder(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test getting recorder status when recorder is not present."""
     client = await hass_ws_client()
 
-    await client.send_json({"id": 1, "type": "recorder/info"})
+    await client.send_json_auto_id({"type": "recorder/info"})
     response = await client.receive_json()
     assert not response["success"]
     assert response["error"]["code"] == "unknown_command"
 
 
-async def test_recorder_info_bad_recorder_config(hass, hass_ws_client):
+async def test_recorder_info_bad_recorder_config(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
     """Test getting recorder status when recorder is not started."""
     config = {recorder.CONF_DB_URL: "sqlite://no_file", recorder.CONF_DB_RETRY_WAIT: 0}
 
     client = await hass_ws_client()
 
-    with patch("homeassistant.components.recorder.migration.migrate_schema"):
+    with patch("homeassistant.components.recorder.migration._migrate_schema"):
         recorder_helper.async_initialize_recorder(hass)
         assert not await async_setup_component(
             hass, recorder.DOMAIN, {recorder.DOMAIN: config}
@@ -2067,149 +2596,103 @@ async def test_recorder_info_bad_recorder_config(hass, hass_ws_client):
     # Wait for recorder to shut down
     await hass.async_add_executor_job(recorder.get_instance(hass).join)
 
-    await client.send_json({"id": 1, "type": "recorder/info"})
+    await client.send_json_auto_id({"type": "recorder/info"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"]["recording"] is False
     assert response["result"]["thread_running"] is False
 
 
-async def test_recorder_info_migration_queue_exhausted(hass, hass_ws_client):
+async def test_recorder_info_no_instance(
+    recorder_mock: Recorder, hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """Test getting recorder when there is no instance."""
+    client = await hass_ws_client()
+
+    with patch(
+        "homeassistant.components.recorder.basic_websocket_api.get_instance",
+        return_value=None,
+    ):
+        await client.send_json_auto_id({"type": "recorder/info"})
+        response = await client.receive_json()
+        assert response["success"]
+        assert response["result"]["recording"] is False
+        assert response["result"]["thread_running"] is False
+
+
+async def test_recorder_info_migration_queue_exhausted(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    async_test_recorder: RecorderInstanceGenerator,
+    instrument_migration: InstrumentedMigration,
+) -> None:
     """Test getting recorder status when recorder queue is exhausted."""
     assert recorder.util.async_migration_in_progress(hass) is False
 
-    migration_done = threading.Event()
-
-    real_migration = recorder.migration._apply_update
-
-    def stalled_migration(*args):
-        """Make migration stall."""
-        nonlocal migration_done
-        migration_done.wait()
-        return real_migration(*args)
-
-    with patch("homeassistant.components.recorder.ALLOW_IN_MEMORY_DB", True), patch(
-        "homeassistant.components.recorder.Recorder.async_periodic_statistics"
-    ), patch(
-        "homeassistant.components.recorder.core.create_engine",
-        new=create_engine_test,
-    ), patch.object(
-        recorder.core, "MAX_QUEUE_BACKLOG", 1
-    ), patch(
-        "homeassistant.components.recorder.migration._apply_update",
-        wraps=stalled_migration,
+    with (
+        patch(
+            "homeassistant.components.recorder.core.create_engine",
+            new=create_engine_test,
+        ),
+        patch.object(recorder.core, "MAX_QUEUE_BACKLOG_MIN_VALUE", 1),
+        patch.object(
+            recorder.core, "MIN_AVAILABLE_MEMORY_FOR_QUEUE_BACKLOG", sys.maxsize
+        ),
     ):
-        recorder_helper.async_initialize_recorder(hass)
-        hass.create_task(
-            async_setup_component(
-                hass, "recorder", {"recorder": {"db_url": "sqlite://"}}
+        async with async_test_recorder(
+            hass, wait_recorder=False, wait_recorder_setup=False
+        ):
+            await hass.async_add_executor_job(
+                instrument_migration.migration_started.wait
             )
-        )
-        await recorder_helper.async_wait_recorder(hass)
-        hass.states.async_set("my.entity", "on", {})
-        await hass.async_block_till_done()
+            assert recorder.util.async_migration_in_progress(hass) is True
+            await recorder_helper.async_wait_recorder(hass)
+            hass.states.async_set("my.entity", "on", {})
+            await hass.async_block_till_done()
 
-        # Detect queue full
-        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=2))
-        await hass.async_block_till_done()
+            # Detect queue full
+            async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=2))
+            await hass.async_block_till_done()
 
-        client = await hass_ws_client()
+            client = await hass_ws_client()
 
-        # Check the status
-        await client.send_json({"id": 1, "type": "recorder/info"})
-        response = await client.receive_json()
-        assert response["success"]
-        assert response["result"]["migration_in_progress"] is True
-        assert response["result"]["recording"] is False
-        assert response["result"]["thread_running"] is True
+            # Check the status
+            await client.send_json_auto_id({"type": "recorder/info"})
+            response = await client.receive_json()
+            assert response["success"]
+            assert response["result"]["migration_in_progress"] is True
+            assert response["result"]["recording"] is False
+            assert response["result"]["thread_running"] is True
 
-    # Let migration finish
-    migration_done.set()
-    await async_wait_recording_done(hass)
+            # Let migration finish
+            instrument_migration.migration_stall.set()
+            await async_wait_recording_done(hass)
 
-    # Check the status after migration finished
-    await client.send_json({"id": 2, "type": "recorder/info"})
-    response = await client.receive_json()
-    assert response["success"]
-    assert response["result"]["migration_in_progress"] is False
-    assert response["result"]["recording"] is True
-    assert response["result"]["thread_running"] is True
+            # Check the status after migration finished
+            await client.send_json_auto_id({"type": "recorder/info"})
+            response = await client.receive_json()
+            assert response["success"]
+            assert response["result"]["migration_in_progress"] is False
+            assert response["result"]["recording"] is True
+            assert response["result"]["thread_running"] is True
 
 
 async def test_backup_start_no_recorder(
-    hass, hass_ws_client, hass_supervisor_access_token
-):
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    hass_supervisor_access_token: str,
+) -> None:
     """Test getting backup start when recorder is not present."""
     client = await hass_ws_client(hass, hass_supervisor_access_token)
 
-    await client.send_json({"id": 1, "type": "backup/start"})
+    await client.send_json_auto_id({"type": "backup/start"})
     response = await client.receive_json()
     assert not response["success"]
     assert response["error"]["code"] == "unknown_command"
 
 
-async def test_backup_start_timeout(
-    recorder_mock, hass, hass_ws_client, hass_supervisor_access_token, recorder_db_url
-):
-    """Test getting backup start when recorder is not present."""
-    if recorder_db_url.startswith("mysql://"):
-        # This test is specific for SQLite: Locking is not implemented for other engines
-        return
-
-    client = await hass_ws_client(hass, hass_supervisor_access_token)
-
-    # Ensure there are no queued events
-    await async_wait_recording_done(hass)
-
-    with patch.object(recorder.core, "DB_LOCK_TIMEOUT", 0):
-        try:
-            await client.send_json({"id": 1, "type": "backup/start"})
-            response = await client.receive_json()
-            assert not response["success"]
-            assert response["error"]["code"] == "timeout_error"
-        finally:
-            await client.send_json({"id": 2, "type": "backup/end"})
-
-
-async def test_backup_end(
-    recorder_mock, hass, hass_ws_client, hass_supervisor_access_token
-):
-    """Test backup start."""
-    client = await hass_ws_client(hass, hass_supervisor_access_token)
-
-    # Ensure there are no queued events
-    await async_wait_recording_done(hass)
-
-    await client.send_json({"id": 1, "type": "backup/start"})
-    response = await client.receive_json()
-    assert response["success"]
-
-    await client.send_json({"id": 2, "type": "backup/end"})
-    response = await client.receive_json()
-    assert response["success"]
-
-
-async def test_backup_end_without_start(
-    recorder_mock, hass, hass_ws_client, hass_supervisor_access_token, recorder_db_url
-):
-    """Test backup start."""
-    if recorder_db_url.startswith("mysql://"):
-        # This test is specific for SQLite: Locking is not implemented for other engines
-        return
-
-    client = await hass_ws_client(hass, hass_supervisor_access_token)
-
-    # Ensure there are no queued events
-    await async_wait_recording_done(hass)
-
-    await client.send_json({"id": 1, "type": "backup/end"})
-    response = await client.receive_json()
-    assert not response["success"]
-    assert response["error"]["code"] == "database_unlock_failed"
-
-
 @pytest.mark.parametrize(
-    "units, attributes, unit, unit_class",
+    ("units", "attributes", "unit", "unit_class"),
     [
         (METRIC_SYSTEM, ENERGY_SENSOR_KWH_ATTRIBUTES, "kWh", "energy"),
         (METRIC_SYSTEM, ENERGY_SENSOR_WH_ATTRIBUTES, "kWh", "energy"),
@@ -2228,10 +2711,16 @@ async def test_backup_end_without_start(
     ],
 )
 async def test_get_statistics_metadata(
-    recorder_mock, hass, hass_ws_client, units, attributes, unit, unit_class
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    units,
+    attributes,
+    unit,
+    unit_class,
+) -> None:
     """Test get_statistics_metadata."""
-    now = dt_util.utcnow()
+    now = get_start_time(dt_util.utcnow())
     has_mean = attributes["state_class"] == "measurement"
     has_sum = not has_mean
 
@@ -2240,7 +2729,7 @@ async def test_get_statistics_metadata(
     await async_recorder_block_till_done(hass)
 
     client = await hass_ws_client()
-    await client.send_json({"id": 1, "type": "recorder/get_statistics_metadata"})
+    await client.send_json_auto_id({"type": "recorder/get_statistics_metadata"})
     response = await client.receive_json()
     assert response["success"]
     assert response["result"] == []
@@ -2289,9 +2778,8 @@ async def test_get_statistics_metadata(
     )
     await async_wait_recording_done(hass)
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/get_statistics_metadata",
             "statistic_ids": ["test:total_gas"],
         }
@@ -2311,15 +2799,18 @@ async def test_get_statistics_metadata(
         }
     ]
 
-    hass.states.async_set("sensor.test", 10, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test", 10, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
-    hass.states.async_set("sensor.test2", 10, attributes=attributes)
+    hass.states.async_set(
+        "sensor.test2", 10, attributes=attributes, timestamp=now.timestamp()
+    )
     await async_wait_recording_done(hass)
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 3,
             "type": "recorder/get_statistics_metadata",
             "statistic_ids": ["sensor.test"],
         }
@@ -2345,9 +2836,8 @@ async def test_get_statistics_metadata(
     hass.states.async_remove("sensor.test")
     await hass.async_block_till_done()
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 4,
             "type": "recorder/get_statistics_metadata",
             "statistic_ids": ["sensor.test"],
         }
@@ -2369,15 +2859,20 @@ async def test_get_statistics_metadata(
 
 
 @pytest.mark.parametrize(
-    "source, statistic_id",
-    (
+    ("source", "statistic_id"),
+    [
         ("test", "test:total_energy_import"),
         ("recorder", "sensor.total_energy_import"),
-    ),
+    ],
 )
 async def test_import_statistics(
-    recorder_mock, hass, hass_ws_client, caplog, source, statistic_id
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    caplog: pytest.LogCaptureFixture,
+    source,
+    statistic_id,
+) -> None:
     """Test importing statistics."""
     client = await hass_ws_client()
 
@@ -2410,9 +2905,8 @@ async def test_import_statistics(
         "unit_of_measurement": "kWh",
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/import_statistics",
             "metadata": imported_metadata,
             "stats": [imported_statistics1, imported_statistics2],
@@ -2423,32 +2917,28 @@ async def test_import_statistics(
     assert response["result"] is None
 
     await async_wait_recording_done(hass)
-    stats = statistics_during_period(hass, zero, period="hour")
+    stats = statistics_during_period(
+        hass, zero, period="hour", statistic_ids={statistic_id}
+    )
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": (period1 + timedelta(hours=1)),
-                "max": None,
-                "mean": None,
-                "min": None,
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "last_reset": None,
                 "state": pytest.approx(0.0),
                 "sum": pytest.approx(2.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
-                "max": None,
-                "mean": None,
-                "min": None,
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "last_reset": None,
                 "state": pytest.approx(1.0),
                 "sum": pytest.approx(3.0),
             },
         ]
     }
-    statistic_ids = list_statistic_ids(hass)  # TODO
+    statistic_ids = list_statistic_ids(hass)
     assert statistic_ids == [
         {
             "display_unit_of_measurement": "kWh",
@@ -2461,7 +2951,7 @@ async def test_import_statistics(
             "unit_class": "energy",
         }
     ]
-    metadata = get_metadata(hass, statistic_ids=(statistic_id,))
+    metadata = get_metadata(hass, statistic_ids={statistic_id})
     assert metadata == {
         statistic_id: (
             1,
@@ -2485,11 +2975,8 @@ async def test_import_statistics(
     assert last_stats == {
         statistic_id: [
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
-                "max": None,
-                "mean": None,
-                "min": None,
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "last_reset": None,
                 "state": pytest.approx(1.0),
                 "sum": pytest.approx(3.0),
@@ -2505,9 +2992,8 @@ async def test_import_statistics(
         "sum": 6,
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 2,
             "type": "recorder/import_statistics",
             "metadata": imported_metadata,
             "stats": [external_statistics],
@@ -2518,25 +3004,21 @@ async def test_import_statistics(
     assert response["result"] is None
 
     await async_wait_recording_done(hass)
-    stats = statistics_during_period(hass, zero, period="hour")
+    stats = statistics_during_period(
+        hass, zero, period="hour", statistic_ids={statistic_id}
+    )
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
-                "max": None,
-                "mean": None,
-                "min": None,
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "last_reset": None,
                 "state": pytest.approx(5.0),
                 "sum": pytest.approx(6.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
-                "max": None,
-                "mean": None,
-                "min": None,
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "last_reset": None,
                 "state": pytest.approx(1.0),
                 "sum": pytest.approx(3.0),
@@ -2555,9 +3037,8 @@ async def test_import_statistics(
         "sum": 5,
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 3,
             "type": "recorder/import_statistics",
             "metadata": imported_metadata,
             "stats": [external_statistics],
@@ -2568,25 +3049,21 @@ async def test_import_statistics(
     assert response["result"] is None
 
     await async_wait_recording_done(hass)
-    stats = statistics_during_period(hass, zero, period="hour")
+    stats = statistics_during_period(
+        hass, zero, period="hour", statistic_ids={statistic_id}
+    )
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
-                "max": pytest.approx(1.0),
-                "mean": pytest.approx(2.0),
-                "min": pytest.approx(3.0),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "last_reset": None,
                 "state": pytest.approx(4.0),
                 "sum": pytest.approx(5.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
-                "max": None,
-                "mean": None,
-                "min": None,
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "last_reset": None,
                 "state": pytest.approx(1.0),
                 "sum": pytest.approx(3.0),
@@ -2596,15 +3073,20 @@ async def test_import_statistics(
 
 
 @pytest.mark.parametrize(
-    "source, statistic_id",
-    (
+    ("source", "statistic_id"),
+    [
         ("test", "test:total_energy_import"),
         ("recorder", "sensor.total_energy_import"),
-    ),
+    ],
 )
 async def test_adjust_sum_statistics_energy(
-    recorder_mock, hass, hass_ws_client, caplog, source, statistic_id
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    caplog: pytest.LogCaptureFixture,
+    source,
+    statistic_id,
+) -> None:
     """Test adjusting statistics."""
     client = await hass_ws_client()
 
@@ -2637,9 +3119,8 @@ async def test_adjust_sum_statistics_energy(
         "unit_of_measurement": "kWh",
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/import_statistics",
             "metadata": imported_metadata,
             "stats": [imported_statistics1, imported_statistics2],
@@ -2654,8 +3135,8 @@ async def test_adjust_sum_statistics_energy(
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2664,8 +3145,8 @@ async def test_adjust_sum_statistics_energy(
                 "sum": pytest.approx(2.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2675,7 +3156,7 @@ async def test_adjust_sum_statistics_energy(
             },
         ]
     }
-    statistic_ids = list_statistic_ids(hass)  # TODO
+    statistic_ids = list_statistic_ids(hass)
     assert statistic_ids == [
         {
             "display_unit_of_measurement": "kWh",
@@ -2688,7 +3169,7 @@ async def test_adjust_sum_statistics_energy(
             "unit_class": "energy",
         }
     ]
-    metadata = get_metadata(hass, statistic_ids=(statistic_id,))
+    metadata = get_metadata(hass, statistic_ids={statistic_id})
     assert metadata == {
         statistic_id: (
             1,
@@ -2704,9 +3185,8 @@ async def test_adjust_sum_statistics_energy(
     }
 
     # Adjust previously inserted statistics in kWh
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 4,
             "type": "recorder/adjust_sum_statistics",
             "statistic_id": statistic_id,
             "start_time": period2.isoformat(),
@@ -2722,8 +3202,8 @@ async def test_adjust_sum_statistics_energy(
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "max": pytest.approx(None),
                 "mean": pytest.approx(None),
                 "min": pytest.approx(None),
@@ -2732,8 +3212,8 @@ async def test_adjust_sum_statistics_energy(
                 "sum": pytest.approx(2.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2745,9 +3225,8 @@ async def test_adjust_sum_statistics_energy(
     }
 
     # Adjust previously inserted statistics in MWh
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 5,
             "type": "recorder/adjust_sum_statistics",
             "statistic_id": statistic_id,
             "start_time": period2.isoformat(),
@@ -2763,8 +3242,8 @@ async def test_adjust_sum_statistics_energy(
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "max": pytest.approx(None),
                 "mean": pytest.approx(None),
                 "min": pytest.approx(None),
@@ -2773,8 +3252,8 @@ async def test_adjust_sum_statistics_energy(
                 "sum": pytest.approx(2.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2787,15 +3266,20 @@ async def test_adjust_sum_statistics_energy(
 
 
 @pytest.mark.parametrize(
-    "source, statistic_id",
-    (
+    ("source", "statistic_id"),
+    [
         ("test", "test:total_gas"),
         ("recorder", "sensor.total_gas"),
-    ),
+    ],
 )
 async def test_adjust_sum_statistics_gas(
-    recorder_mock, hass, hass_ws_client, caplog, source, statistic_id
-):
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    caplog: pytest.LogCaptureFixture,
+    source,
+    statistic_id,
+) -> None:
     """Test adjusting statistics."""
     client = await hass_ws_client()
 
@@ -2828,9 +3312,8 @@ async def test_adjust_sum_statistics_gas(
         "unit_of_measurement": "m³",
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/import_statistics",
             "metadata": imported_metadata,
             "stats": [imported_statistics1, imported_statistics2],
@@ -2845,8 +3328,8 @@ async def test_adjust_sum_statistics_gas(
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2855,8 +3338,8 @@ async def test_adjust_sum_statistics_gas(
                 "sum": pytest.approx(2.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2866,7 +3349,7 @@ async def test_adjust_sum_statistics_gas(
             },
         ]
     }
-    statistic_ids = list_statistic_ids(hass)  # TODO
+    statistic_ids = list_statistic_ids(hass)
     assert statistic_ids == [
         {
             "display_unit_of_measurement": "m³",
@@ -2879,7 +3362,7 @@ async def test_adjust_sum_statistics_gas(
             "unit_class": "volume",
         }
     ]
-    metadata = get_metadata(hass, statistic_ids=(statistic_id,))
+    metadata = get_metadata(hass, statistic_ids={statistic_id})
     assert metadata == {
         statistic_id: (
             1,
@@ -2895,9 +3378,8 @@ async def test_adjust_sum_statistics_gas(
     }
 
     # Adjust previously inserted statistics in m³
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 4,
             "type": "recorder/adjust_sum_statistics",
             "statistic_id": statistic_id,
             "start_time": period2.isoformat(),
@@ -2913,8 +3395,8 @@ async def test_adjust_sum_statistics_gas(
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "max": pytest.approx(None),
                 "mean": pytest.approx(None),
                 "min": pytest.approx(None),
@@ -2923,8 +3405,8 @@ async def test_adjust_sum_statistics_gas(
                 "sum": pytest.approx(2.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2936,9 +3418,8 @@ async def test_adjust_sum_statistics_gas(
     }
 
     # Adjust previously inserted statistics in ft³
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 5,
             "type": "recorder/adjust_sum_statistics",
             "statistic_id": statistic_id,
             "start_time": period2.isoformat(),
@@ -2954,8 +3435,8 @@ async def test_adjust_sum_statistics_gas(
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "max": pytest.approx(None),
                 "mean": pytest.approx(None),
                 "min": pytest.approx(None),
@@ -2964,8 +3445,8 @@ async def test_adjust_sum_statistics_gas(
                 "sum": pytest.approx(2.0),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -2978,28 +3459,35 @@ async def test_adjust_sum_statistics_gas(
 
 
 @pytest.mark.parametrize(
-    "state_unit, statistic_unit, unit_class, factor, valid_units, invalid_units",
     (
+        "state_unit",
+        "statistic_unit",
+        "unit_class",
+        "factor",
+        "valid_units",
+        "invalid_units",
+    ),
+    [
         ("kWh", "kWh", "energy", 1, ("Wh", "kWh", "MWh"), ("ft³", "m³", "cats", None)),
         ("MWh", "MWh", "energy", 1, ("Wh", "kWh", "MWh"), ("ft³", "m³", "cats", None)),
         ("m³", "m³", "volume", 1, ("ft³", "m³"), ("Wh", "kWh", "MWh", "cats", None)),
         ("ft³", "ft³", "volume", 1, ("ft³", "m³"), ("Wh", "kWh", "MWh", "cats", None)),
         ("dogs", "dogs", None, 1, ("dogs",), ("cats", None)),
         (None, None, "unitless", 1, (None,), ("cats",)),
-    ),
+    ],
 )
 async def test_adjust_sum_statistics_errors(
-    recorder_mock,
-    hass,
-    hass_ws_client,
-    caplog,
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    caplog: pytest.LogCaptureFixture,
     state_unit,
     statistic_unit,
     unit_class,
     factor,
     valid_units,
     invalid_units,
-):
+) -> None:
     """Test incorrectly adjusting statistics."""
     statistic_id = "sensor.total_energy_import"
     source = "recorder"
@@ -3034,9 +3522,8 @@ async def test_adjust_sum_statistics_errors(
         "unit_of_measurement": statistic_unit,
     }
 
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": 1,
             "type": "recorder/import_statistics",
             "metadata": imported_metadata,
             "stats": [imported_statistics1, imported_statistics2],
@@ -3051,8 +3538,8 @@ async def test_adjust_sum_statistics_errors(
     assert stats == {
         statistic_id: [
             {
-                "start": period1,
-                "end": period1 + timedelta(hours=1),
+                "start": period1.timestamp(),
+                "end": (period1 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -3061,8 +3548,8 @@ async def test_adjust_sum_statistics_errors(
                 "sum": pytest.approx(2.0 * factor),
             },
             {
-                "start": period2,
-                "end": period2 + timedelta(hours=1),
+                "start": period2.timestamp(),
+                "end": (period2 + timedelta(hours=1)).timestamp(),
                 "max": None,
                 "mean": None,
                 "min": None,
@@ -3086,7 +3573,7 @@ async def test_adjust_sum_statistics_errors(
             "unit_class": unit_class,
         }
     ]
-    metadata = get_metadata(hass, statistic_ids=(statistic_id,))
+    metadata = get_metadata(hass, statistic_ids={statistic_id})
     assert metadata == {
         statistic_id: (
             1,
@@ -3102,10 +3589,8 @@ async def test_adjust_sum_statistics_errors(
     }
 
     # Try to adjust statistics
-    msg_id = 2
-    await client.send_json(
+    await client.send_json_auto_id(
         {
-            "id": msg_id,
             "type": "recorder/adjust_sum_statistics",
             "statistic_id": "sensor.does_not_exist",
             "start_time": period2.isoformat(),
@@ -3122,10 +3607,8 @@ async def test_adjust_sum_statistics_errors(
     assert stats == previous_stats
 
     for unit in invalid_units:
-        msg_id += 1
-        await client.send_json(
+        await client.send_json_auto_id(
             {
-                "id": msg_id,
                 "type": "recorder/adjust_sum_statistics",
                 "statistic_id": statistic_id,
                 "start_time": period2.isoformat(),
@@ -3142,10 +3625,8 @@ async def test_adjust_sum_statistics_errors(
         assert stats == previous_stats
 
     for unit in valid_units:
-        msg_id += 1
-        await client.send_json(
+        await client.send_json_auto_id(
             {
-                "id": msg_id,
                 "type": "recorder/adjust_sum_statistics",
                 "statistic_id": statistic_id,
                 "start_time": period2.isoformat(),
@@ -3160,3 +3641,81 @@ async def test_adjust_sum_statistics_errors(
         stats = statistics_during_period(hass, zero, period="hour")
         assert stats != previous_stats
         previous_stats = stats
+
+
+async def test_import_statistics_with_last_reset(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test importing external statistics with last_reset can be fetched via websocket api."""
+    client = await hass_ws_client()
+
+    assert "Compiling statistics for" not in caplog.text
+    assert "Statistics already compiled" not in caplog.text
+
+    zero = dt_util.utcnow()
+    last_reset = dt_util.parse_datetime("2022-01-01T00:00:00+02:00")
+    period1 = zero.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    period2 = zero.replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+
+    external_statistics1 = {
+        "start": period1,
+        "last_reset": last_reset,
+        "state": 0,
+        "sum": 2,
+    }
+    external_statistics2 = {
+        "start": period2,
+        "last_reset": last_reset,
+        "state": 1,
+        "sum": 3,
+    }
+
+    external_metadata = {
+        "has_mean": False,
+        "has_sum": True,
+        "name": "Total imported energy",
+        "source": "test",
+        "statistic_id": "test:total_energy_import",
+        "unit_of_measurement": "kWh",
+    }
+
+    async_add_external_statistics(
+        hass, external_metadata, (external_statistics1, external_statistics2)
+    )
+    await async_wait_recording_done(hass)
+
+    client = await hass_ws_client()
+    await client.send_json_auto_id(
+        {
+            "type": "recorder/statistics_during_period",
+            "start_time": zero.isoformat(),
+            "end_time": (zero + timedelta(hours=48)).isoformat(),
+            "statistic_ids": ["test:total_energy_import"],
+            "period": "hour",
+            "types": ["change", "last_reset", "max", "mean", "min", "state", "sum"],
+        }
+    )
+    response = await client.receive_json()
+    assert response["result"] == {
+        "test:total_energy_import": [
+            {
+                "change": 2.0,
+                "end": (period1.timestamp() * 1000) + (3600 * 1000),
+                "last_reset": last_reset.timestamp() * 1000,
+                "start": period1.timestamp() * 1000,
+                "state": 0.0,
+                "sum": 2.0,
+            },
+            {
+                "change": 1.0,
+                "end": (period2.timestamp() * 1000 + (3600 * 1000)),
+                "last_reset": last_reset.timestamp() * 1000,
+                "start": period2.timestamp() * 1000,
+                "state": 1.0,
+                "sum": 3.0,
+            },
+        ]
+    }

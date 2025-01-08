@@ -1,4 +1,5 @@
 """Tests for the AVM Fritz!Box integration."""
+
 from __future__ import annotations
 
 from unittest.mock import Mock
@@ -18,7 +19,7 @@ from tests.typing import ClientSessionGenerator
 
 async def test_entry_diagnostics(
     hass: HomeAssistant, hass_client: ClientSessionGenerator, fritz: Mock
-):
+) -> None:
     """Test config entry diagnostics."""
     assert await setup_config_entry(hass, MOCK_CONFIG[FB_DOMAIN][CONF_DEVICES][0])
 
@@ -29,4 +30,4 @@ async def test_entry_diagnostics(
 
     result = await get_diagnostics_for_config_entry(hass, hass_client, entries[0])
 
-    assert result == {"entry": entry_dict, "data": {}}
+    assert result == {"entry": entry_dict | {"discovery_keys": {}}, "data": {}}

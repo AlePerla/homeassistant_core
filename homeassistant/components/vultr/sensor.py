@@ -1,4 +1,5 @@
 """Support for monitoring the state of Vultr Subscriptions."""
+
 from __future__ import annotations
 
 import logging
@@ -6,7 +7,7 @@ import logging
 import voluptuous as vol
 
 from homeassistant.components.sensor import (
-    PLATFORM_SCHEMA,
+    PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -44,7 +45,7 @@ SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
 )
 SENSOR_KEYS: list[str] = [desc.key for desc in SENSOR_TYPES]
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_SUBSCRIPTION): cv.string,
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
@@ -84,7 +85,9 @@ def setup_platform(
 class VultrSensor(SensorEntity):
     """Representation of a Vultr subscription sensor."""
 
-    def __init__(self, vultr, subscription, name, description: SensorEntityDescription):
+    def __init__(
+        self, vultr, subscription, name, description: SensorEntityDescription
+    ) -> None:
         """Initialize a new Vultr sensor."""
         self.entity_description = description
         self._vultr = vultr

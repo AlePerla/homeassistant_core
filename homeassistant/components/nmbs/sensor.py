@@ -1,4 +1,5 @@
 """Get ride details and liveboard details for NMBS (Belgian railway)."""
+
 from __future__ import annotations
 
 import logging
@@ -6,7 +7,10 @@ import logging
 from pyrail import iRail
 import voluptuous as vol
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
+    SensorEntity,
+)
 from homeassistant.const import (
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
@@ -22,6 +26,8 @@ import homeassistant.util.dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
+API_FAILURE = -1
+
 DEFAULT_NAME = "NMBS"
 
 DEFAULT_ICON = "mdi:train"
@@ -32,7 +38,7 @@ CONF_STATION_TO = "station_to"
 CONF_STATION_LIVE = "station_live"
 CONF_EXCLUDE_VIAS = "exclude_vias"
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_STATION_FROM): cv.string,
         vol.Required(CONF_STATION_TO): cv.string,
@@ -162,10 +168,19 @@ class NMBSLiveBoard(SensorEntity):
         """Set the state equal to the next departure."""
         liveboard = self._api_client.get_liveboard(self._station)
 
-        if liveboard is None or not liveboard.get("departures"):
+        if liveboard == API_FAILURE:
+            _LOGGER.warning("API failed in NMBSLiveBoard")
             return
 
-        next_departure = liveboard["departures"]["departure"][0]
+        if not (departures := liveboard.get("departures")):
+            _LOGGER.warning("API returned invalid departures: %r", liveboard)
+            return
+
+        _LOGGER.debug("API returned departures: %r", departures)
+        if departures["number"] == "0":
+            # No trains are scheduled
+            return
+        next_departure = departures["departure"][0]
 
         self._attrs = next_departure
         self._state = (
@@ -246,7 +261,7 @@ class NMBSSensor(SensorEntity):
             attrs["via_arrival_platform"] = via["arrival"]["platform"]
             attrs["via_transfer_platform"] = via["departure"]["platform"]
             attrs["via_transfer_time"] = get_delay_in_minutes(
-                via["timeBetween"]
+                via["timebetween"]
             ) + get_delay_in_minutes(via["departure"]["delay"])
 
         if delay > 0:
@@ -284,13 +299,19 @@ class NMBSSensor(SensorEntity):
             self._station_from, self._station_to
         )
 
-        if connections is None or not connections.get("connection"):
+        if connections == API_FAILURE:
+            _LOGGER.warning("API failed in NMBSSensor")
             return
 
-        if int(connections["connection"][0]["departure"]["left"]) > 0:
-            next_connection = connections["connection"][1]
+        if not (connection := connections.get("connection")):
+            _LOGGER.warning("API returned invalid connection: %r", connections)
+            return
+
+        _LOGGER.debug("API returned connection: %r", connection)
+        if int(connection[0]["departure"]["left"]) > 0:
+            next_connection = connection[1]
         else:
-            next_connection = connections["connection"][0]
+            next_connection = connection[0]
 
         self._attrs = next_connection
 

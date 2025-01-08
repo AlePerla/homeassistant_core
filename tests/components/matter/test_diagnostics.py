@@ -1,20 +1,20 @@
 """Test the Matter diagnostics platform."""
+
 from __future__ import annotations
 
 import json
 from typing import Any
 from unittest.mock import MagicMock
 
+from matter_server.client.models.node import MatterNode
 from matter_server.common.helpers.util import dataclass_from_dict
-from matter_server.common.models.server_information import ServerDiagnostics
+from matter_server.common.models import ServerDiagnostics
 import pytest
 
 from homeassistant.components.matter.const import DOMAIN
 from homeassistant.components.matter.diagnostics import redact_matter_attributes
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
-
-from .common import setup_integration_with_node_fixture
 
 from tests.common import MockConfigEntry, load_fixture
 from tests.components.diagnostics import (
@@ -44,17 +44,15 @@ def device_diagnostics_fixture() -> dict[str, Any]:
 
 async def test_matter_attribute_redact(device_diagnostics: dict[str, Any]) -> None:
     """Test the matter attribute redact helper."""
-    assert device_diagnostics["attributes"]["0/40/6"]["value"] == "XX"
+    assert device_diagnostics["attributes"]["0/40/6"] == "XX"
 
     redacted_device_diagnostics = redact_matter_attributes(device_diagnostics)
 
     # Check that the correct attribute value is redacted.
-    assert (
-        redacted_device_diagnostics["attributes"]["0/40/6"]["value"] == "**REDACTED**"
-    )
+    assert redacted_device_diagnostics["attributes"]["0/40/6"] == "**REDACTED**"
 
     # Check that the other attribute values are not redacted.
-    redacted_device_diagnostics["attributes"]["0/40/6"]["value"] = "XX"
+    redacted_device_diagnostics["attributes"]["0/40/6"] = "XX"
     assert redacted_device_diagnostics == device_diagnostics
 
 
@@ -76,15 +74,17 @@ async def test_config_entry_diagnostics(
     assert diagnostics == config_entry_diagnostics_redacted
 
 
+@pytest.mark.parametrize("node_fixture", ["device_diagnostics"])
 async def test_device_diagnostics(
     hass: HomeAssistant,
     hass_client: ClientSessionGenerator,
+    device_registry: dr.DeviceRegistry,
     matter_client: MagicMock,
     config_entry_diagnostics: dict[str, Any],
     device_diagnostics: dict[str, Any],
+    matter_node: MatterNode,
 ) -> None:
     """Test the device diagnostics."""
-    await setup_integration_with_node_fixture(hass, "device_diagnostics", matter_client)
     system_info_dict = config_entry_diagnostics["info"]
     device_diagnostics_redacted = {
         "server_info": system_info_dict,
@@ -100,12 +100,12 @@ async def test_device_diagnostics(
     )
     matter_client.get_diagnostics.return_value = server_diagnostics
     config_entry = hass.config_entries.async_entries(DOMAIN)[0]
-    dev_reg = dr.async_get(hass)
-    device = dr.async_entries_for_config_entry(dev_reg, config_entry.entry_id)[0]
+    device = dr.async_entries_for_config_entry(device_registry, config_entry.entry_id)[
+        0
+    ]
     assert device
 
     diagnostics = await get_diagnostics_for_device(
         hass, hass_client, config_entry, device
     )
-
     assert diagnostics == device_diagnostics_redacted

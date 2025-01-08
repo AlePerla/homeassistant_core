@@ -1,14 +1,16 @@
 """SQLAlchemy util functions."""
+
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
+import contextlib
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 import functools
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Any, Concatenate, NoReturn, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, Concatenate, NoReturn
 
 from awesomeversion import (
     AwesomeVersion,
@@ -16,10 +18,10 @@ from awesomeversion import (
     AwesomeVersionStrategy,
 )
 import ciso8601
-from sqlalchemy import text
-from sqlalchemy.engine.cursor import CursorFetchStrategy
-from sqlalchemy.engine.row import Row
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import Result, Row
+from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.exc import OperationalError, SQLAlchemyError, StatementError
 from sqlalchemy.orm.query import Query
 from sqlalchemy.orm.session import Session
 from sqlalchemy.sql.lambdas import StatementLambdaElement
@@ -27,22 +29,39 @@ import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers.recorder import (  # noqa: F401
+    DATA_INSTANCE,
+    get_instance,
+    session_scope,
+)
 import homeassistant.util.dt as dt_util
 
-from .const import DATA_INSTANCE, DOMAIN, SQLITE_URL_PREFIX, SupportedDialect
+from .const import (
+    DEFAULT_MAX_BIND_VARS,
+    DOMAIN,
+    SQLITE_MAX_BIND_VARS,
+    SQLITE_MODERN_MAX_BIND_VARS,
+    SQLITE_URL_PREFIX,
+    SupportedDialect,
+)
 from .db_schema import (
     TABLE_RECORDER_RUNS,
     TABLE_SCHEMA_CHANGES,
     TABLES_TO_CHECK,
     RecorderRuns,
 )
-from .models import StatisticPeriod, UnsupportedDialect, process_timestamp
+from .models import (
+    DatabaseEngine,
+    DatabaseOptimizer,
+    StatisticPeriod,
+    UnsupportedDialect,
+    process_timestamp,
+)
 
 if TYPE_CHECKING:
-    from . import Recorder
+    from sqlite3.dbapi2 import Cursor as SQLiteCursor
 
-_RecorderT = TypeVar("_RecorderT", bound="Recorder")
-_P = ParamSpec("_P")
+    from . import Recorder
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,44 +70,35 @@ QUERY_RETRY_WAIT = 0.1
 SQLITE3_POSTFIXES = ["", "-wal", "-shm"]
 DEFAULT_YIELD_STATES_ROWS = 32768
 
+
 # Our minimum versions for each database
 #
 # Older MariaDB suffers https://jira.mariadb.org/browse/MDEV-25020
 # which is fixed in 10.5.17, 10.6.9, 10.7.5, 10.8.4
 #
-MIN_VERSION_MARIA_DB = AwesomeVersion(
-    "10.3.0", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-RECOMMENDED_MIN_VERSION_MARIA_DB = AwesomeVersion(
-    "10.5.17", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-MARIA_DB_106 = AwesomeVersion(
-    "10.6.0", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-RECOMMENDED_MIN_VERSION_MARIA_DB_106 = AwesomeVersion(
-    "10.6.9", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-MARIA_DB_107 = AwesomeVersion(
-    "10.7.0", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-RECOMMENDED_MIN_VERSION_MARIA_DB_107 = AwesomeVersion(
-    "10.7.5", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-MARIA_DB_108 = AwesomeVersion(
-    "10.8.0", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-RECOMMENDED_MIN_VERSION_MARIA_DB_108 = AwesomeVersion(
-    "10.8.4", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-MIN_VERSION_MYSQL = AwesomeVersion(
-    "8.0.0", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-MIN_VERSION_PGSQL = AwesomeVersion(
-    "12.0", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
-MIN_VERSION_SQLITE = AwesomeVersion(
-    "3.31.0", ensure_strategy=AwesomeVersionStrategy.SIMPLEVER
-)
+def _simple_version(version: str) -> AwesomeVersion:
+    """Return a simple version."""
+    return AwesomeVersion(version, ensure_strategy=AwesomeVersionStrategy.SIMPLEVER)
+
+
+MIN_VERSION_MARIA_DB = _simple_version("10.3.0")
+RECOMMENDED_MIN_VERSION_MARIA_DB = _simple_version("10.5.17")
+MARIADB_WITH_FIXED_IN_QUERIES_105 = _simple_version("10.5.17")
+MARIA_DB_106 = _simple_version("10.6.0")
+MARIADB_WITH_FIXED_IN_QUERIES_106 = _simple_version("10.6.9")
+RECOMMENDED_MIN_VERSION_MARIA_DB_106 = _simple_version("10.6.9")
+MARIA_DB_107 = _simple_version("10.7.0")
+RECOMMENDED_MIN_VERSION_MARIA_DB_107 = _simple_version("10.7.5")
+MARIADB_WITH_FIXED_IN_QUERIES_107 = _simple_version("10.7.5")
+MARIA_DB_108 = _simple_version("10.8.0")
+RECOMMENDED_MIN_VERSION_MARIA_DB_108 = _simple_version("10.8.4")
+MARIADB_WITH_FIXED_IN_QUERIES_108 = _simple_version("10.8.4")
+MIN_VERSION_MYSQL = _simple_version("8.0.0")
+MIN_VERSION_PGSQL = _simple_version("12.0")
+MIN_VERSION_SQLITE = _simple_version("3.31.0")
+UPCOMING_MIN_VERSION_SQLITE = _simple_version("3.40.1")
+MIN_VERSION_SQLITE_MODERN_BIND_VARS = _simple_version("3.32.0")
+
 
 # This is the maximum time after the recorder ends the session
 # before we no longer consider startup to be a "restart" and we
@@ -97,6 +107,8 @@ MAX_RESTART_TIME = timedelta(minutes=10)
 
 # Retry when one of the following MySQL errors occurred:
 RETRYABLE_MYSQL_ERRORS = (1205, 1206, 1213)
+# The error codes are hard coded because the PyMySQL library may not be
+# installed when using database engines other than MySQL or MariaDB.
 # 1205: Lock wait timeout exceeded; try restarting transaction
 # 1206: The total number of locks exceeds the lock table size
 # 1213: Deadlock found when trying to get lock; try restarting transaction
@@ -106,53 +118,6 @@ SUNDAY_WEEKDAY = 6
 DAYS_IN_WEEK = 7
 
 
-@contextmanager
-def session_scope(
-    *,
-    hass: HomeAssistant | None = None,
-    session: Session | None = None,
-    exception_filter: Callable[[Exception], bool] | None = None,
-) -> Generator[Session, None, None]:
-    """Provide a transactional scope around a series of operations."""
-    if session is None and hass is not None:
-        session = get_instance(hass).get_session()
-
-    if session is None:
-        raise RuntimeError("Session required")
-
-    need_rollback = False
-    try:
-        yield session
-        if session.get_transaction():
-            need_rollback = True
-            session.commit()
-    except Exception as err:  # pylint: disable=broad-except
-        _LOGGER.error("Error executing query: %s", err)
-        if need_rollback:
-            session.rollback()
-        if not exception_filter or not exception_filter(err):
-            raise
-    finally:
-        session.close()
-
-
-def commit(session: Session, work: Any) -> bool:
-    """Commit & retry work: Either a model or in a function."""
-    for _ in range(0, RETRIES):
-        try:
-            if callable(work):
-                work(session)
-            else:
-                session.add(work)
-            session.commit()
-            return True
-        except OperationalError as err:
-            _LOGGER.error("Error executing query: %s", err)
-            session.rollback()
-            time.sleep(QUERY_RETRY_WAIT)
-    return False
-
-
 def execute(
     qry: Query, to_native: bool = False, validate_entity_ids: bool = True
 ) -> list[Row]:
@@ -160,9 +125,12 @@ def execute(
 
     This method also retries a few times in the case of stale connections.
     """
-    for tryno in range(0, RETRIES):
+    debug = _LOGGER.isEnabledFor(logging.DEBUG)
+    for tryno in range(RETRIES):
         try:
-            timer_start = time.perf_counter()
+            if debug:
+                timer_start = time.perf_counter()
+
             if to_native:
                 result = [
                     row
@@ -175,7 +143,7 @@ def execute(
             else:
                 result = qry.all()
 
-            if _LOGGER.isEnabledFor(logging.DEBUG):
+            if debug:
                 elapsed = time.perf_counter() - timer_start
                 if to_native:
                     _LOGGER.debug(
@@ -190,13 +158,14 @@ def execute(
                         elapsed,
                     )
 
-            return result
         except SQLAlchemyError as err:
             _LOGGER.error("Error executing query: %s", err)
 
             if tryno == RETRIES - 1:
                 raise
             time.sleep(QUERY_RETRY_WAIT)
+        else:
+            return result
 
     # Unreachable
     raise RuntimeError  # pragma: no cover
@@ -207,8 +176,9 @@ def execute_stmt_lambda_element(
     stmt: StatementLambdaElement,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
-    yield_per: int | None = DEFAULT_YIELD_STATES_ROWS,
-) -> list[Row]:
+    yield_per: int = DEFAULT_YIELD_STATES_ROWS,
+    orm_rows: bool = True,
+) -> Sequence[Row] | Result:
     """Execute a StatementLambdaElement.
 
     If the time window passed is greater than one day
@@ -220,13 +190,16 @@ def execute_stmt_lambda_element(
     specific entities) since they are usually faster
     with .all().
     """
-    executed = session.execute(stmt)
     use_all = not start_time or ((end_time or dt_util.utcnow()) - start_time).days <= 1
     for tryno in range(RETRIES):
         try:
+            if orm_rows:
+                executed = session.execute(stmt)
+            else:
+                executed = session.connection().execute(stmt)
             if use_all:
-                return executed.all()  # type: ignore[no-any-return]
-            return executed.yield_per(yield_per)  # type: ignore[no-any-return]
+                return executed.all()
+            return executed.yield_per(yield_per)
         except SQLAlchemyError as err:
             _LOGGER.error("Error executing query: %s", err)
             if tryno == RETRIES - 1:
@@ -257,7 +230,7 @@ def dburl_to_path(dburl: str) -> str:
     return dburl.removeprefix(SQLITE_URL_PREFIX)
 
 
-def last_run_was_recently_clean(cursor: CursorFetchStrategy) -> bool:
+def last_run_was_recently_clean(cursor: SQLiteCursor) -> bool:
     """Verify the last recorder run was recently clean."""
 
     cursor.execute("SELECT end FROM recorder_runs ORDER BY start DESC LIMIT 1;")
@@ -278,14 +251,16 @@ def last_run_was_recently_clean(cursor: CursorFetchStrategy) -> bool:
     return True
 
 
-def basic_sanity_check(cursor: CursorFetchStrategy) -> bool:
+def basic_sanity_check(cursor: SQLiteCursor) -> bool:
     """Check tables to make sure select does not fail."""
 
     for table in TABLES_TO_CHECK:
         if table in (TABLE_RECORDER_RUNS, TABLE_SCHEMA_CHANGES):
-            cursor.execute(f"SELECT * FROM {table};")  # nosec # not injection
+            cursor.execute(f"SELECT * FROM {table};")  # noqa: S608 # not injection
         else:
-            cursor.execute(f"SELECT * FROM {table} LIMIT 1;")  # nosec # not injection
+            cursor.execute(
+                f"SELECT * FROM {table} LIMIT 1;"  # noqa: S608 # not injection
+            )
 
     return True
 
@@ -305,7 +280,7 @@ def validate_sqlite_database(dbpath: str) -> bool:
     return True
 
 
-def run_checks_on_open_db(dbpath: str, cursor: CursorFetchStrategy) -> None:
+def run_checks_on_open_db(dbpath: str, cursor: SQLiteCursor) -> None:
     """Run checks that will generate a sqlite3 exception if there is corruption."""
     sanity_check_passed = basic_sanity_check(cursor)
     last_run_was_clean = last_run_was_recently_clean(cursor)
@@ -354,14 +329,14 @@ def move_away_broken_database(dbfile: str) -> None:
         os.rename(path, f"{path}{corrupt_postfix}")
 
 
-def execute_on_connection(dbapi_connection: Any, statement: str) -> None:
+def execute_on_connection(dbapi_connection: DBAPIConnection, statement: str) -> None:
     """Execute a single statement with a dbapi connection."""
     cursor = dbapi_connection.cursor()
     cursor.execute(statement)
     cursor.close()
 
 
-def query_on_connection(dbapi_connection: Any, statement: str) -> Any:
+def query_on_connection(dbapi_connection: DBAPIConnection, statement: str) -> Any:
     """Execute a single statement with a dbapi connection and return the result."""
     cursor = dbapi_connection.cursor()
     cursor.execute(statement)
@@ -384,7 +359,7 @@ def _fail_unsupported_dialect(dialect_name: str) -> NoReturn:
     raise UnsupportedDialect
 
 
-def _fail_unsupported_version(
+def _raise_if_version_unsupported(
     server_version: str, dialect_name: str, minimum_version: str
 ) -> NoReturn:
     """Warn about unsupported database version."""
@@ -401,16 +376,54 @@ def _fail_unsupported_version(
     raise UnsupportedDialect
 
 
+@callback
+def _async_delete_issue_deprecated_version(
+    hass: HomeAssistant, dialect_name: str
+) -> None:
+    """Delete the issue about upcoming unsupported database version."""
+    ir.async_delete_issue(hass, DOMAIN, f"{dialect_name}_too_old")
+
+
+@callback
+def _async_create_issue_deprecated_version(
+    hass: HomeAssistant,
+    server_version: AwesomeVersion,
+    dialect_name: str,
+    min_version: AwesomeVersion,
+) -> None:
+    """Warn about upcoming unsupported database version."""
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        f"{dialect_name}_too_old",
+        is_fixable=False,
+        severity=ir.IssueSeverity.CRITICAL,
+        translation_key=f"{dialect_name}_too_old",
+        translation_placeholders={
+            "server_version": str(server_version),
+            "min_version": str(min_version),
+        },
+        breaks_in_ha_version="2025.2.0",
+    )
+
+
+def _extract_version_from_server_response_or_raise(
+    server_response: str,
+) -> AwesomeVersion:
+    """Extract version from server response."""
+    return AwesomeVersion(
+        server_response,
+        ensure_strategy=AwesomeVersionStrategy.SIMPLEVER,
+        find_first_match=True,
+    )
+
+
 def _extract_version_from_server_response(
     server_response: str,
 ) -> AwesomeVersion | None:
     """Attempt to extract version from server response."""
     try:
-        return AwesomeVersion(
-            server_response,
-            ensure_strategy=AwesomeVersionStrategy.SIMPLEVER,
-            find_first_match=True,
-        )
+        return _extract_version_from_server_response_or_raise(server_response)
     except AwesomeVersionException:
         return None
 
@@ -429,7 +442,7 @@ def _datetime_or_none(value: str) -> datetime | None:
 def build_mysqldb_conv() -> dict:
     """Build a MySQLDB conv dict that uses cisco8601 to parse datetimes."""
     # Late imports since we only call this if they are using mysqldb
-    # pylint: disable=import-outside-toplevel,import-error
+    # pylint: disable=import-outside-toplevel
     from MySQLdb.constants import FIELD_TYPE
     from MySQLdb.converters import conversions
 
@@ -464,31 +477,68 @@ def _async_create_mariadb_range_index_regression_issue(
     )
 
 
+@callback
+def async_create_backup_failure_issue(
+    hass: HomeAssistant,
+    local_start_time: datetime,
+) -> None:
+    """Create an issue when the backup fails because we run out of resources."""
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        "backup_failed_out_of_resources",
+        is_fixable=False,
+        severity=ir.IssueSeverity.CRITICAL,
+        learn_more_url="https://www.home-assistant.io/integrations/recorder",
+        translation_key="backup_failed_out_of_resources",
+        translation_placeholders={"start_time": local_start_time.strftime("%H:%M:%S")},
+    )
+
+
 def setup_connection_for_dialect(
     instance: Recorder,
     dialect_name: str,
-    dbapi_connection: Any,
+    dbapi_connection: DBAPIConnection,
     first_connection: bool,
-) -> AwesomeVersion | None:
+) -> DatabaseEngine | None:
     """Execute statements needed for dialect connection."""
     version: AwesomeVersion | None = None
+    slow_range_in_select = False
     if dialect_name == SupportedDialect.SQLITE:
+        max_bind_vars = SQLITE_MAX_BIND_VARS
         if first_connection:
-            old_isolation = dbapi_connection.isolation_level
-            dbapi_connection.isolation_level = None
+            old_isolation = dbapi_connection.isolation_level  # type: ignore[attr-defined]
+            dbapi_connection.isolation_level = None  # type: ignore[attr-defined]
             execute_on_connection(dbapi_connection, "PRAGMA journal_mode=WAL")
-            dbapi_connection.isolation_level = old_isolation
+            dbapi_connection.isolation_level = old_isolation  # type: ignore[attr-defined]
             # WAL mode only needs to be setup once
             # instead of every time we open the sqlite connection
             # as its persistent and isn't free to call every time.
             result = query_on_connection(dbapi_connection, "SELECT sqlite_version()")
             version_string = result[0][0]
-            version = _extract_version_from_server_response(version_string)
+            version = _extract_version_from_server_response_or_raise(version_string)
 
-            if not version or version < MIN_VERSION_SQLITE:
-                _fail_unsupported_version(
+            if version < MIN_VERSION_SQLITE:
+                _raise_if_version_unsupported(
                     version or version_string, "SQLite", MIN_VERSION_SQLITE
                 )
+
+            # No elif here since _raise_if_version_unsupported raises
+            if version < UPCOMING_MIN_VERSION_SQLITE:
+                instance.hass.add_job(
+                    _async_create_issue_deprecated_version,
+                    instance.hass,
+                    version or version_string,
+                    dialect_name,
+                    UPCOMING_MIN_VERSION_SQLITE,
+                )
+            else:
+                instance.hass.add_job(
+                    _async_delete_issue_deprecated_version, instance.hass, dialect_name
+                )
+
+            if version and version > MIN_VERSION_SQLITE_MODERN_BIND_VARS:
+                max_bind_vars = SQLITE_MODERN_MAX_BIND_VARS
 
         # The upper bound on the cache size is approximately 16MiB of memory
         execute_on_connection(dbapi_connection, "PRAGMA cache_size = -16384")
@@ -508,6 +558,7 @@ def setup_connection_for_dialect(
         execute_on_connection(dbapi_connection, "PRAGMA foreign_keys=ON")
 
     elif dialect_name == SupportedDialect.MYSQL:
+        max_bind_vars = DEFAULT_MAX_BIND_VARS
         execute_on_connection(dbapi_connection, "SET session wait_timeout=28800")
         if first_connection:
             result = query_on_connection(dbapi_connection, "SELECT VERSION()")
@@ -517,7 +568,7 @@ def setup_connection_for_dialect(
 
             if is_maria_db:
                 if not version or version < MIN_VERSION_MARIA_DB:
-                    _fail_unsupported_version(
+                    _raise_if_version_unsupported(
                         version or version_string, "MariaDB", MIN_VERSION_MARIA_DB
                     )
                 if version and (
@@ -532,27 +583,51 @@ def setup_connection_for_dialect(
                         version,
                     )
 
-            else:
-                if not version or version < MIN_VERSION_MYSQL:
-                    _fail_unsupported_version(
-                        version or version_string, "MySQL", MIN_VERSION_MYSQL
-                    )
+            elif not version or version < MIN_VERSION_MYSQL:
+                _raise_if_version_unsupported(
+                    version or version_string, "MySQL", MIN_VERSION_MYSQL
+                )
 
+            slow_range_in_select = bool(
+                not version
+                or version < MARIADB_WITH_FIXED_IN_QUERIES_105
+                or MARIA_DB_106 <= version < MARIADB_WITH_FIXED_IN_QUERIES_106
+                or MARIA_DB_107 <= version < MARIADB_WITH_FIXED_IN_QUERIES_107
+                or MARIA_DB_108 <= version < MARIADB_WITH_FIXED_IN_QUERIES_108
+            )
+
+        # Ensure all times are using UTC to avoid issues with daylight savings
+        execute_on_connection(dbapi_connection, "SET time_zone = '+00:00'")
     elif dialect_name == SupportedDialect.POSTGRESQL:
+        max_bind_vars = DEFAULT_MAX_BIND_VARS
+        # PostgreSQL does not support a skip/loose index scan so its
+        # also slow for large distinct queries:
+        # https://wiki.postgresql.org/wiki/Loose_indexscan
+        # https://github.com/home-assistant/core/issues/126084
+        # so we set slow_range_in_select to True
+        slow_range_in_select = True
         if first_connection:
             # server_version_num was added in 2006
             result = query_on_connection(dbapi_connection, "SHOW server_version")
             version_string = result[0][0]
             version = _extract_version_from_server_response(version_string)
             if not version or version < MIN_VERSION_PGSQL:
-                _fail_unsupported_version(
+                _raise_if_version_unsupported(
                     version or version_string, "PostgreSQL", MIN_VERSION_PGSQL
                 )
 
     else:
         _fail_unsupported_dialect(dialect_name)
 
-    return version
+    if not first_connection:
+        return None
+
+    return DatabaseEngine(
+        dialect=SupportedDialect(dialect_name),
+        version=version,
+        optimizer=DatabaseOptimizer(slow_range_in_select=slow_range_in_select),
+        max_bind_vars=max_bind_vars,
+    )
 
 
 def end_incomplete_runs(session: Session, start_time: datetime) -> None:
@@ -566,46 +641,145 @@ def end_incomplete_runs(session: Session, start_time: datetime) -> None:
         session.add(run)
 
 
-def retryable_database_job(
+def _is_retryable_error(instance: Recorder, err: OperationalError) -> bool:
+    """Return True if the error is retryable."""
+    assert instance.engine is not None
+    return bool(
+        instance.engine.dialect.name == SupportedDialect.MYSQL
+        and isinstance(err.orig, BaseException)
+        and err.orig.args
+        and err.orig.args[0] in RETRYABLE_MYSQL_ERRORS
+    )
+
+
+type _FuncType[**P, R] = Callable[Concatenate[Recorder, P], R]
+type _MethType[Self, **P, R] = Callable[Concatenate[Self, Recorder, P], R]
+type _FuncOrMethType[**_P, _R] = Callable[_P, _R]
+
+
+def retryable_database_job[**_P](
     description: str,
-) -> Callable[
-    [Callable[Concatenate[_RecorderT, _P], bool]],
-    Callable[Concatenate[_RecorderT, _P], bool],
-]:
-    """Try to execute a database job.
+) -> Callable[[_FuncType[_P, bool]], _FuncType[_P, bool]]:
+    """Execute a database job repeatedly until it succeeds.
 
     The job should return True if it finished, and False if it needs to be rescheduled.
     """
 
-    def decorator(
-        job: Callable[Concatenate[_RecorderT, _P], bool]
-    ) -> Callable[Concatenate[_RecorderT, _P], bool]:
-        @functools.wraps(job)
-        def wrapper(instance: _RecorderT, *args: _P.args, **kwargs: _P.kwargs) -> bool:
-            try:
-                return job(instance, *args, **kwargs)
-            except OperationalError as err:
-                assert instance.engine is not None
-                if (
-                    instance.engine.dialect.name == SupportedDialect.MYSQL
-                    and err.orig
-                    and err.orig.args[0] in RETRYABLE_MYSQL_ERRORS
-                ):
-                    _LOGGER.info(
-                        "%s; %s not completed, retrying", err.orig.args[1], description
-                    )
-                    time.sleep(instance.db_retry_wait)
-                    # Failed with retryable error
-                    return False
-
-                _LOGGER.warning("Error executing %s: %s", description, err)
-
-            # Failed with permanent error
-            return True
-
-        return wrapper
+    def decorator(job: _FuncType[_P, bool]) -> _FuncType[_P, bool]:
+        return _wrap_retryable_database_job_func_or_meth(job, description, False)
 
     return decorator
+
+
+def retryable_database_job_method[_Self, **_P](
+    description: str,
+) -> Callable[[_MethType[_Self, _P, bool]], _MethType[_Self, _P, bool]]:
+    """Execute a database job repeatedly until it succeeds.
+
+    The job should return True if it finished, and False if it needs to be rescheduled.
+    """
+
+    def decorator(job: _MethType[_Self, _P, bool]) -> _MethType[_Self, _P, bool]:
+        return _wrap_retryable_database_job_func_or_meth(job, description, True)
+
+    return decorator
+
+
+def _wrap_retryable_database_job_func_or_meth[**_P](
+    job: _FuncOrMethType[_P, bool], description: str, method: bool
+) -> _FuncOrMethType[_P, bool]:
+    recorder_pos = 1 if method else 0
+
+    @functools.wraps(job)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> bool:
+        instance: Recorder = args[recorder_pos]  # type: ignore[assignment]
+        try:
+            return job(*args, **kwargs)
+        except OperationalError as err:
+            if _is_retryable_error(instance, err):
+                assert isinstance(err.orig, BaseException)  # noqa: PT017
+                _LOGGER.info(
+                    "%s; %s not completed, retrying", err.orig.args[1], description
+                )
+                time.sleep(instance.db_retry_wait)
+                # Failed with retryable error
+                return False
+
+            _LOGGER.warning("Error executing %s: %s", description, err)
+
+        # Failed with permanent error
+        return True
+
+    return wrapper
+
+
+def database_job_retry_wrapper[**_P, _R](
+    description: str, attempts: int
+) -> Callable[[_FuncType[_P, _R]], _FuncType[_P, _R]]:
+    """Execute a database job repeatedly until it succeeds, at most attempts times.
+
+    This wrapper handles InnoDB deadlocks and lock timeouts.
+
+    This is different from retryable_database_job in that it will retry the job
+    attempts number of times instead of returning False if the job fails.
+    """
+
+    def decorator(
+        job: _FuncType[_P, _R],
+    ) -> _FuncType[_P, _R]:
+        return _database_job_retry_wrapper_func_or_meth(
+            job, description, attempts, False
+        )
+
+    return decorator
+
+
+def database_job_retry_wrapper_method[_Self, **_P, _R](
+    description: str, attempts: int
+) -> Callable[[_MethType[_Self, _P, _R]], _MethType[_Self, _P, _R]]:
+    """Execute a database job repeatedly until it succeeds, at most attempts times.
+
+    This wrapper handles InnoDB deadlocks and lock timeouts.
+
+    This is different from retryable_database_job in that it will retry the job
+    attempts number of times instead of returning False if the job fails.
+    """
+
+    def decorator(
+        job: _MethType[_Self, _P, _R],
+    ) -> _MethType[_Self, _P, _R]:
+        return _database_job_retry_wrapper_func_or_meth(
+            job, description, attempts, True
+        )
+
+    return decorator
+
+
+def _database_job_retry_wrapper_func_or_meth[**_P, _R](
+    job: _FuncOrMethType[_P, _R],
+    description: str,
+    attempts: int,
+    method: bool,
+) -> _FuncOrMethType[_P, _R]:
+    recorder_pos = 1 if method else 0
+
+    @functools.wraps(job)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        instance: Recorder = args[recorder_pos]  # type: ignore[assignment]
+        for attempt in range(attempts):
+            try:
+                return job(*args, **kwargs)
+            except OperationalError as err:
+                # Failed with retryable error
+                if attempt == attempts - 1 or not _is_retryable_error(instance, err):
+                    raise
+                assert isinstance(err.orig, BaseException)  # noqa: PT017
+                _LOGGER.info("%s; %s failed, retrying", err.orig.args[1], description)
+                time.sleep(instance.db_retry_wait)
+
+        raise ValueError("attempts must be a positive integer")
+
+    return wrapper
 
 
 def periodic_db_cleanups(instance: Recorder) -> None:
@@ -619,10 +793,11 @@ def periodic_db_cleanups(instance: Recorder) -> None:
         _LOGGER.debug("WAL checkpoint")
         with instance.engine.connect() as connection:
             connection.execute(text("PRAGMA wal_checkpoint(TRUNCATE);"))
+            connection.execute(text("PRAGMA OPTIMIZE;"))
 
 
 @contextmanager
-def write_lock_db_sqlite(instance: Recorder) -> Generator[None, None, None]:
+def write_lock_db_sqlite(instance: Recorder) -> Generator[None]:
     """Lock database for writes."""
     assert instance.engine is not None
     with instance.engine.connect() as connection:
@@ -647,8 +822,7 @@ def async_migration_in_progress(hass: HomeAssistant) -> bool:
     """
     if DATA_INSTANCE not in hass.data:
         return False
-    instance = get_instance(hass)
-    return instance.migration_in_progress
+    return hass.data[DATA_INSTANCE].migration_in_progress
 
 
 def async_migration_is_live(hass: HomeAssistant) -> bool:
@@ -659,8 +833,7 @@ def async_migration_is_live(hass: HomeAssistant) -> bool:
     """
     if DATA_INSTANCE not in hass.data:
         return False
-    instance: Recorder = hass.data[DATA_INSTANCE]
-    return instance.migration_is_live
+    return hass.data[DATA_INSTANCE].migration_is_live
 
 
 def second_sunday(year: int, month: int) -> date:
@@ -677,12 +850,6 @@ def second_sunday(year: int, month: int) -> date:
 def is_second_sunday(date_time: datetime) -> bool:
     """Check if a time is the second sunday of the month."""
     return bool(second_sunday(date_time.year, date_time.month).day == date_time.day)
-
-
-def get_instance(hass: HomeAssistant) -> Recorder:
-    """Get the recorder instance."""
-    instance: Recorder = hass.data[DATA_INSTANCE]
-    return instance
 
 
 PERIOD_SCHEMA = vol.Schema(
@@ -733,17 +900,16 @@ def resolve_period(
             start_time += timedelta(days=cal_offset * 7)
             end_time = start_time + timedelta(weeks=1)
         elif calendar_period == "month":
-            start_time = start_of_day.replace(day=28)
-            # This works for up to 48 months of offset
-            start_time = (start_time + timedelta(days=cal_offset * 31)).replace(day=1)
+            month_now = start_of_day.month
+            new_month = (month_now - 1 + cal_offset) % 12 + 1
+            new_year = start_of_day.year + (month_now - 1 + cal_offset) // 12
+            start_time = start_of_day.replace(year=new_year, month=new_month, day=1)
             end_time = (start_time + timedelta(days=31)).replace(day=1)
         else:  # calendar_period = "year"
-            start_time = start_of_day.replace(month=12, day=31)
-            # This works for 100+ years of offset
-            start_time = (start_time + timedelta(days=cal_offset * 366)).replace(
-                month=1, day=1
+            start_time = start_of_day.replace(
+                year=start_of_day.year + cal_offset, month=1, day=1
             )
-            end_time = (start_time + timedelta(days=365)).replace(day=1)
+            end_time = (start_time + timedelta(days=366)).replace(day=1)
 
         start_time = dt_util.as_utc(start_time)
         end_time = dt_util.as_utc(end_time)
@@ -763,3 +929,73 @@ def resolve_period(
             end_time += offset
 
     return (start_time, end_time)
+
+
+def get_index_by_name(session: Session, table_name: str, index_name: str) -> str | None:
+    """Get an index by name."""
+    connection = session.connection()
+    inspector = inspect(connection)
+    indexes = inspector.get_indexes(table_name)
+    return next(
+        (
+            possible_index["name"]
+            for possible_index in indexes
+            if possible_index["name"]
+            and (
+                possible_index["name"] == index_name
+                or possible_index["name"].endswith(f"_{index_name}")
+            )
+        ),
+        None,
+    )
+
+
+def filter_unique_constraint_integrity_error(
+    instance: Recorder, row_type: str
+) -> Callable[[Exception], bool]:
+    """Create a filter for unique constraint integrity errors."""
+
+    def _filter_unique_constraint_integrity_error(err: Exception) -> bool:
+        """Handle unique constraint integrity errors."""
+        if not isinstance(err, StatementError):
+            return False
+
+        assert instance.engine is not None
+        dialect_name = instance.engine.dialect.name
+
+        ignore = False
+        if (
+            dialect_name == SupportedDialect.SQLITE
+            and "UNIQUE constraint failed" in str(err)
+        ):
+            ignore = True
+        if (
+            dialect_name == SupportedDialect.POSTGRESQL
+            and err.orig
+            and hasattr(err.orig, "pgcode")
+            and err.orig.pgcode == "23505"
+        ):
+            ignore = True
+        if (
+            dialect_name == SupportedDialect.MYSQL
+            and err.orig
+            and hasattr(err.orig, "args")
+        ):
+            with contextlib.suppress(TypeError):
+                if err.orig.args[0] == 1062:
+                    ignore = True
+
+        if ignore:
+            _LOGGER.warning(
+                (
+                    "Blocked attempt to insert duplicated %s rows, please report"
+                    " at %s"
+                ),
+                row_type,
+                "https://github.com/home-assistant/core/issues?q=is%3Aopen+is%3Aissue+label%3A%22integration%3A+recorder%22",
+                exc_info=err,
+            )
+
+        return ignore
+
+    return _filter_unique_constraint_integrity_error
